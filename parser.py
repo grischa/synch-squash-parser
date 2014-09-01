@@ -2,6 +2,9 @@
 from collections import deque
 from magic import Magic
 import os
+import re
+
+from django.db.models import Q
 
 from tardis.tardis_portal.models import Dataset, DataFile, DataFileObject
 from tardis.tardis_portal.util import generate_file_checksums
@@ -10,10 +13,29 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def parse_squashfs_file(exp, squash_sbox, inst,
+def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                         directory, filename, filepath):
-    dfos = DataFileObject.objects.filter(datafile__dataset__experiments=exp,
-                                         uri__endswith=filepath)
+
+    def get_dataset(name, directory=''):
+        dataset, created = Dataset.objects.get_or_create(
+            description=name, directory=directory)
+        if created:
+            dataset.save()
+            dataset.experiments.add(exp)
+        dataset.storage_boxes.add(squash_sbox)
+        return dataset
+
+    exp_q = Q(datafile__dataset__experiments=exp)
+    path_part_match_q = Q(uri__endswith=filepath)
+    path_exact_match_q = Q(uri=filepath)
+    s_box_q = Q(storage_box=squash_sbox)
+    # check whether file has been registered alread, stored elsewhere:
+    dfos = DataFileObject.objects.filter(exp_q, path_part_match_q,
+                                         ~s_box_q)
+    if len(dfos) == 1:
+        return dfos[0].datafile
+    # file registered already
+    dfos = DataFileObject.objects.filter(exp_q, path_exact_match_q, s_box_q)
     if len(dfos) == 1:
         return dfos[0]
 
@@ -22,63 +44,74 @@ def parse_squashfs_file(exp, squash_sbox, inst,
         if filepath.find(i_str) > -1:
             return None
 
-    basedirs = ['home', 'frames']
-
-    typical_home = {
-        'Desktop': {'description': 'Desktop folder'},
-        'Documents': {'description': 'Documents folder'},
-        'Downloads': {'description': 'Downloads folder'},
-        'IDLWorkspace': {'description': 'IDL Workspace folder',
-                         'ignore': True},
-        'Music': {'description': 'Music folder',
-                  'ignore': True},
-        'Pictures': {'description': 'Pictures folder'},
-        'Public': {'description': 'Public folder'},
-        'Templates': {'description': 'Templates folder'},
-        'Videos': {'description': 'Videos folder'},
-        'areavision': {'description': 'Area Vision settings',
-                       'ignore': True},
-        'camera_settings': {'description': 'Camera settings',
-                            'ignore': True},
-        'chromium': {'description': 'Chromium folder',
-                     'ignore': True},
-        'edm_files': {'description': 'EDM files',
-                      'ignore': True},
-        'google-chrome': {'description': 'bad chrome symlink',
-                          'ignore': True},
-        'restart_logs': {'description': 'Restart logs',
-                         'ignore': True},
-        'sync': {'description': 'Sync folder',
-                 'ignore': True},
-        'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
-                      'ignore': True},
-        '': {'description': 'other files'},
-    }
-    user_subfolders = {
-        'auto': {'description': 'unknown'},
-    }
+    # basedirs = ['home', 'frames']
 
     dir_list = deque(directory.split(os.sep))
     first_dir = dir_list.popleft()
-    if first_dir == 'frames':
+    if first_dir != 'home':
         # add image missed earlier
-
-
-    in_list = typical_home.get(first_dir, False)
-    if in_list:
-        if in_list.get('ignore', False):
-            return None
-        first_dir = in_list.get('dataset_name', first_dir)
+        dataset = get_dataset('stray files')
     else:
+        typical_home = {
+            'Desktop': {'description': 'Desktop folder'},
+            'Documents': {'description': 'Documents folder'},
+            'Downloads': {'description': 'Downloads folder'},
+            'IDLWorkspace': {'description': 'IDL Workspace folder',
+                             'ignore': True},
+            'Music': {'description': 'Music folder',
+                      'ignore': True},
+            'Pictures': {'description': 'Pictures folder'},
+            'Public': {'description': 'Public folder'},
+            'Templates': {'description': 'Templates folder'},
+            'Videos': {'description': 'Videos folder'},
+            'areavision': {'description': 'Area Vision settings',
+                           'ignore': True},
+            'camera_settings': {'description': 'Camera settings',
+                                'ignore': True},
+            'chromium': {'description': 'Chromium folder',
+                         'ignore': True},
+            'edm_files': {'description': 'EDM files',
+                          'ignore': True},
+            'google-chrome': {'description': 'bad chrome symlink',
+                              'ignore': True},
+            'restart_logs': {'description': 'Restart logs',
+                             'ignore': True},
+            'sync': {'description': 'Sync folder',
+                     'ignore': True},
+            'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
+                          'ignore': True},
+            '': {'description': 'other files'},
+        }
+        second_dir = dir_list.popleft()
+        in_list = typical_home.get(second_dir, False)
+        if in_list:
+            if in_list.get('ignore', False):
+                return None
+            dataset = get_dataset(in_list.get('dataset_name', second_dir),
+                                  directory='home')
+            directory = os.path.join(dir_list)
+        else:
+            if dir_list[1] == 'auto':
+                auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
+                                '([0-9]+)_([0-9a-fA-F]+)'
+                match = re.findall(auto_ds_regex, filepath)
+                if match:
+                    match = match[0]
+                    # example:
+                    # ('xds_process', 'p186_p16ds1_11', '300',
+                    #  '53e26bf7f6ddfc73ef2c09a8')
+                    xds = match[0] == 'xds_process'
+                    dataset_name = match[1]
+                    number_of_images = match[2]
+                    auto_id = match[3]
 
-    auto_ds_regex = "(xds_process)?_?([a-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)"
-    special_files = {
-        'frames/.info': {'description': 'JSON'}}
+            dataset = get_dataset(first_dir or 'other files',
+                                  directory='home')
+            directory = os.path.join(*dir_list)
 
-    dataset = Dataset.objects.get_or_create(
-        description=first_dir or 'other files',
-        experiment=exp)
-    directory = os.path.join(*dir_list)
+
+
+
 
     filesize = inst.size(filepath)
     md5, sha512, size, mimetype_buffer = generate_file_checksums(
