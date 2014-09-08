@@ -29,7 +29,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
     path_part_match_q = Q(uri__endswith=filepath)
     path_exact_match_q = Q(uri=filepath)
     s_box_q = Q(storage_box=squash_sbox)
-    # check whether file has been registered alread, stored elsewhere:
+    # check whether file has been registered already, stored elsewhere:
     dfos = DataFileObject.objects.filter(exp_q, path_part_match_q,
                                          ~s_box_q)
     if len(dfos) == 1:
@@ -92,18 +92,22 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
             directory = os.path.join(dir_list)
         else:
             if dir_list[1] == 'auto':
-                auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
-                                '([0-9]+)_([0-9a-fA-F]+)'
-                match = re.findall(auto_ds_regex, filepath)
-                if match:
-                    match = match[0]
-                    # example:
-                    # ('xds_process', 'p186_p16ds1_11', '300',
-                    #  '53e26bf7f6ddfc73ef2c09a8')
-                    xds = match[0] == 'xds_process'
-                    dataset_name = match[1]
-                    number_of_images = match[2]
-                    auto_id = match[3]
+                if dir_list[2] == 'index':
+                    auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
+                                       '([0-9]+)(failed)?$'
+                elif dir_list[2] == 'dataset':
+                    auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
+                                    '([0-9]+)_([0-9a-fA-F]+)'
+                    match = re.findall(auto_ds_regex, filepath)
+                    if match:
+                        match = match[0]
+                        # example:
+                        # ('xds_process', 'p186_p16ds1_11', '300',
+                        #  '53e26bf7f6ddfc73ef2c09a8')
+                        xds = match[0] == 'xds_process'
+                        dataset_name = match[1]
+                        number_of_images = match[2]
+                        auto_id = match[3]
 
             dataset = get_dataset(first_dir or 'other files',
                                   directory='home')
