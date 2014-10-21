@@ -1,8 +1,9 @@
+import ast
+import os
+import re
 
 from collections import deque
 from magic import Magic
-import os
-import re
 
 from django.db.models import Q
 
@@ -13,8 +14,61 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def parse_squashfs_box_data(exp, squash_sbox, inst):
+    '''
+    squash file metadata
+
+    path: frames/.info
+    example contents:
+        {'EPN': '8020l',
+         u'PI': {u'Email': u'tom.caradoc-davies@synchrotron.org.au',
+                 u'Name': u'Tom Caradoc-Davies',
+                 u'ScientistID': u'783'},
+         u'finishBooking': u'2014-07-12 08:00:00',
+         u'handover': None,
+         u'proposalType': u'MD',
+         u'startBooking': u'2014-07-11 08:00:00',
+         u'users': []}
+
+        {'EPN': '8107b',
+         u'PI': {u'Email': u'maria.hrmova@adelaide.edu.au',
+                 u'Name': u'Maria Hrmova',
+                 u'ScientistID': u'1886'},
+         u'finishBooking': u'2014-08-01 16:00:00',
+         u'handover': None,
+         u'proposalType': u'CBR',
+         u'startBooking': u'2014-08-01 08:00:00',
+         u'users': [{u'Email': u'maria.hrmova@adelaide.edu.au',
+                     u'Name': u'Maria Hrmova',
+                     u'ScientistID': u'1886'},
+                    {u'Email': u'victor.streltsov@csiro.au',
+                     u'Name': u'Victor Streltsov',
+                     u'ScientistID': u'183'}]}
+
+    '''
+    info_path = 'frames/.info'
+    with inst.open(inf_path) as info_file:
+        info = ast.literal_eval(info_file.read())
+
+    def transform_name(name):
+        f_name, l_name = name.split(' ')
+        u_name = l_name.replace('-', '') + f_name[0]
+        u_name = u_name.lower()
+        return u_name
+
+    try:
+        info['usernames'] = {
+            transform_name(info['PI']['Name']): info['PI']}
+        for user in info['users']:
+            info['usernames'][transform_name(user['Name'])] = user
+    except:
+        pass
+
+    return info
+
+
 def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
-                        directory, filename, filepath):
+                        directory, filename, filepath, box_data=None):
 
     def get_dataset(name, directory=''):
         dataset, created = Dataset.objects.get_or_create(
@@ -25,33 +79,112 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         dataset.storage_boxes.add(squash_sbox)
         return dataset
 
-    exp_q = Q(datafile__dataset__experiments=exp)
-    path_part_match_q = Q(uri__endswith=filepath)
-    path_exact_match_q = Q(uri=filepath)
-    s_box_q = Q(storage_box=squash_sbox)
-    # check whether file has been registered already, stored elsewhere:
-    dfos = DataFileObject.objects.filter(exp_q, path_part_match_q,
-                                         ~s_box_q)
-    if len(dfos) == 1:
-        return dfos[0].datafile
-    # file registered already
-    dfos = DataFileObject.objects.filter(exp_q, path_exact_match_q, s_box_q)
-    if len(dfos) == 1:
-        return dfos[0]
+    def tag_with_user_info(dataset, username):
+        if username not in box_data['usernames']:
+            return
+        ns = 'http://synchrotron.org.au/userinfo'
+        schema = Schema.objects.get_or_create(
+            name="Synchrotron User Information",
+            namespace=ns,
+            type=Schema.NONE,
+            hidden=True)
+        ps = DatasetParameterSet.objects.get_or_create(
+            schema=schema, dataset=dataset)
+        pn_name = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='name',
+            full_name='Full Name',
+            data_type=ParameterName.STRING
+        )
+        pn_email = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='email',
+            full_name='email address',
+            data_type=ParameterName.STRING
+        )
+        pn_scientistid = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='scientistid',
+            full_name='ScientistID',
+            data_type=ParameterName.STRING
+        )
+        data = box_data['usernames'][username]
+        p_name = DatasetParameter.objects.get_or_create(
+            name=pn_name, parameterset=ps)
+        if p_name.string_value is None or p_name.string_value == '':
+            p_name.string_value = data['Name']
+            p_name.save()
+        p_email = DatasetParameter.objects.get_or_create(
+            name=pn_email, parameterset=ps)
+        if p_email.string_value is None or p_name.string_value == '':
+            p_email.string_value = data['Email']
+            p_email.save()
+        p_scientistid = DatasetParameter.objects.get_or_create(
+            name=pn_scientistid, parameterset=ps)
+        if p_scientistid.string_value is None or \
+           p_scientistid.string_value == '':
+            p_scientistid.string_value = data['ScientistID']
+            p_scientistid.save()
+
+    def store_auto_id(dataset, auto_id):
+        ns = 'http://synchrotron.org.au/autoprocessing/xds'
+        schema = Schema.objects.get_or_create(
+            name="Synchrotron Auto Processing Results",
+            namespace=ns,
+            type=Schema.NONE,
+            hidden=True)
+        ps = DatasetParameterSet.objects.get_or_create(
+            schema=schema, dataset=dataset)
+        pn_mongoid = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='mongo_id',
+            full_name='Mongo DB ID',
+            data_type=ParameterName.STRING
+        )
+        p_mongoid = DatasetParameter.objects.get_or_create(
+            name=pn_mongoid, parameterset=ps)
+        if p_mongoid.string_value is None or p_mongoid.string_value == '':
+            p_mongoid.string_value = auto_id
+            p_mongoid.save()
 
     ignore_substrings = ['crystalpics', 'diffpics']
     for i_str in ignore_substrings:
         if filepath.find(i_str) > -1:
             return None
 
+    dir_list = deque(directory.split(os.sep))
+
+    exp_q = Q(datafile__dataset__experiments=exp)
+    path_part_match_q = Q(uri__endswith=filepath)
+    path_exact_match_q = Q(uri=filepath)
+    s_box_q = Q(storage_box=squash_sbox)
+    # check whether file has been registered already, stored elsewhere:
+    dfos = DataFileObject.objects.filter(exp_q, path_part_match_q,
+                                         ~s_box_q).select_related(
+                                             'datafile', 'datafile__dataset')
+    if len(dfos) == 1:
+        df = dfos[0].datafile
+        if df.dataset.directory is None or df.dataset.directory == '':
+            df.dataset.directory = directory
+            df.dataset.save()
+        df.add_original_path_tag(directory, replace=False)
+        if dir_list[0] == 'frames':
+            tag_with_user_info(df.dataset, dir_list[1])
+        return df
+    # file registered already
+    dfos = DataFileObject.objects.filter(exp_q, path_exact_match_q, s_box_q)
+    if len(dfos) == 1:
+        return dfos[0]
+
     # basedirs = ['home', 'frames']
 
-    dir_list = deque(directory.split(os.sep))
     first_dir = dir_list.popleft()
     if first_dir != 'home':
         # add image missed earlier
         dataset = get_dataset('stray files')
     else:
+        dataset = None
+        # first_dir == home
         typical_home = {
             'Desktop': {'description': 'Desktop folder'},
             'Documents': {'description': 'Documents folder'},
@@ -91,11 +224,41 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                                   directory='home')
             directory = os.path.join(dir_list)
         else:
-            if dir_list[1] == 'auto':
-                if dir_list[2] == 'index':
+            # second_dir == username most likely
+            # dir_list == user files
+            if dir_list[0] == 'auto':
+                # store username somewhere for future
+                dataset_name = None
+                if dir_list[1] == 'index':
                     auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
                                        '([0-9]+)(failed)?$'
-                elif dir_list[2] == 'dataset':
+                    match = re.findall(auto_index_regex, filepath)
+                    if match:
+                        match = match[0]
+                        dataset_name = match[0]
+
+                        # match index01.out file for
+                        #  image FILENAME:
+# /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
+                        filename_regex = ' image FILENAME: (.+)'
+                        index01_filename = os.path.join(
+                            first_dir, second_dir,
+                            dir_list[0], dir_list[1], dir_list[2],
+                            'index01.out')
+                        with inst.open(index01_filename, 'r') as indexfile:
+                            index01_contents = indexfile.read()
+                        image_filename_match = re.findall(filename_regex,
+                                                          index01_contents)
+                        if len(image_filename_match) == 1:
+                            image_filename = image_filename_match[0]
+                            image_filename = '/'.join(
+                                image_filename.split('/')[2:])
+                        img_dfos = DataFileObject.objects.filter(
+                            uri__endswith=image_filename)
+                        if len(img_dfos) > 0:
+                            dataset = img_dfos[0].datafile.dataset
+                        # number_of_images = match[1]
+                elif dir_list[1] == 'dataset':
                     auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                                     '([0-9]+)_([0-9a-fA-F]+)'
                     match = re.findall(auto_ds_regex, filepath)
@@ -105,19 +268,46 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                         # ('xds_process', 'p186_p16ds1_11', '300',
                         #  '53e26bf7f6ddfc73ef2c09a8')
                         xds = match[0] == 'xds_process'
+                        # store mongo id for xds ones
                         dataset_name = match[1]
-                        number_of_images = match[2]
+                        # symlink matching
+                        # number_of_images = match[2]
                         auto_id = match[3]
+                        if len(dir_list) > 2:
+                            # actual results, not summary files
+                            link_filename = inst.path(os.path.join(
+                                first_dir, second_dir,
+                                dir_list[0], dir_list[1], dir_list[2],
+                                'img'))
+                            dataset_path = os.readlink(link_filename)
+                            dataset_path = '/'.join(
+                                dataset_path.split('/')[2:])
+                            img_dfos = DataFileObject.objects.filter(
+                                uri__startswith=dataset_path)
+                            if len(img_dfos) > 0:
+                                dataset = img_dfos[0].datafile.dataset
+                            if xds:
+                                store_auto_id(dataset, auto_id)
+                    elif dir_list[1] == 'rickshaw':
+                        dataset = get_dataset('rickshaw_auto_processing')
+                        # store like 'dataset' auto processing
+                if dataset is None and dataset_name is None:
+                    dataset_name = 'other auto processing'
+                else:
+                    dataset_name += ' auto_id: %s' % auto_id
+                    dataset = dataset or get_dataset(
+                        dataset_name, directory='home/auto_processing')
+            else:
+                dataset = get_dataset(first_dir or 'other files',
+                                      directory='home')
+            directory = os.path.join(second_dir, *dir_list)
+            tag_with_user_info(dataset, second_dir)
 
-            dataset = get_dataset(first_dir or 'other files',
-                                  directory='home')
-            directory = os.path.join(*dir_list)
-
-
-
-
-
-    filesize = inst.size(filepath)
+    # to complete function need to set these vars above:
+    # - filepath
+    # - dataset
+    # - filename
+    # - directory
     md5, sha512, size, mimetype_buffer = generate_file_checksums(
         inst.open(filepath))
     mimetype = ''
@@ -126,7 +316,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
     df_dict = {'dataset': dataset,
                'filename': filename,
                'directory': directory,
-               'size': filesize,
+               'size': size,
                'created_time': inst.created_time(filepath),
                'modification_time': inst.modified_time(filepath),
                'mimetype': mimetype,
@@ -134,4 +324,5 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                'sha512sum': sha512}
     df = DataFile(**df_dict)
     df.save()
+    df.add_original_path_tag(directory, replace=True)
     return df
