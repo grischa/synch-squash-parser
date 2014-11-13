@@ -154,6 +154,13 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         if filepath.find(i_str) > -1:
             return None
 
+    def remove_dotslash(path):
+        if path[0:2] == './':
+            return path[2:]
+        return path
+
+    directory = remove_dotslash(directory)
+    filepath = remove_dotslash(filepath)
     dir_list = deque(directory.split(os.sep))
 
     exp_q = Q(datafile__dataset__experiments=exp)
@@ -180,7 +187,10 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
 
     # basedirs = ['home', 'frames']
 
-    first_dir = dir_list.popleft()
+    try:
+        first_dir = dir_list.popleft()
+    except IndexError:
+        dataset = get_dataset('other files', directory='')
     if first_dir != 'home':
         # add image missed earlier
         dataset = get_dataset('stray files')
@@ -217,7 +227,10 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                           'ignore': True},
             '': {'description': 'other files'},
         }
-        second_dir = dir_list.popleft()
+        try:
+            second_dir = dir_list.popleft()
+        except IndexError:
+            second_dir = ''
         in_list = typical_home.get(second_dir, False)
         if in_list:
             if in_list.get('ignore', False):
@@ -228,10 +241,10 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         else:
             # second_dir == username most likely
             # dir_list == user files
-            if dir_list[0] == 'auto':
+            if len(dir_list) > 0 and dir_list[0] == 'auto':
                 # store username somewhere for future
                 dataset_name = None
-                if dir_list[1] == 'index':
+                if len(dir_list) > 1 and dir_list[1] == 'index':
                     auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
                                        '([0-9]+)(failed)?$'
                     match = re.findall(auto_index_regex, filepath)
@@ -260,7 +273,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                         if len(img_dfos) > 0:
                             dataset = img_dfos[0].datafile.dataset
                         # number_of_images = match[1]
-                elif dir_list[1] == 'dataset':
+                elif len(dir_list) > 1 and dir_list[1] == 'dataset':
                     auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                                     '([0-9]+)_([0-9a-fA-F]+)'
                     match = re.findall(auto_ds_regex, filepath)
@@ -290,9 +303,9 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                                 dataset = img_dfos[0].datafile.dataset
                             if xds:
                                 store_auto_id(dataset, auto_id)
-                    elif dir_list[1] == 'rickshaw':
-                        dataset = get_dataset('rickshaw_auto_processing')
-                        # store like 'dataset' auto processing
+                elif len(dir_list) > 1 and dir_list[1] == 'rickshaw':
+                    dataset = get_dataset('rickshaw_auto_processing')
+                    # store like 'dataset' auto processing
                 if dataset is None and dataset_name is None:
                     dataset_name = 'other auto processing'
                 else:
@@ -315,7 +328,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
     mimetype = ''
     if len(mimetype_buffer) > 0:
         mimetype = Magic(mime=True).from_buffer(mimetype_buffer)
-    df_dict = {'dataset': dataset,
+    df_dict = {'dataset': dataset or get_dataset('other files', directory=''),
                'filename': filename,
                'directory': directory,
                'size': size,
@@ -324,7 +337,14 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                'mimetype': mimetype,
                'md5sum': md5,
                'sha512sum': sha512}
-    df = DataFile(**df_dict)
+    try:
+        df = DataFile.objects.get(directory=directory,
+                                  filename=filename,
+                                  dataset=dataset)
+        for key, value in df_dict.items():
+            setattr(df, key, value)
+    except DataFile.DoesNotExist:
+        df = DataFile(**df_dict)
     df.save()
     df.add_original_path_tag(directory, replace=True)
     return df
