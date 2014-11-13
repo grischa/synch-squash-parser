@@ -8,6 +8,8 @@ from magic import Magic
 from django.db.models import Q
 
 from tardis.tardis_portal.models import Dataset, DataFile, DataFileObject
+from tardis.tardis_portal.models import ParameterName, \
+    Schema, DatasetParameterSet, DatasetParameter
 from tardis.tardis_portal.util import generate_file_checksums
 
 import logging
@@ -47,7 +49,7 @@ def parse_squashfs_box_data(exp, squash_sbox, inst):
 
     '''
     info_path = 'frames/.info'
-    with inst.open(inf_path) as info_file:
+    with inst.open(info_path) as info_file:
         info = ast.literal_eval(info_file.read())
 
     def transform_name(name):
@@ -83,43 +85,43 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         if username not in box_data['usernames']:
             return
         ns = 'http://synchrotron.org.au/userinfo'
-        schema = Schema.objects.get_or_create(
+        schema, created = Schema.objects.get_or_create(
             name="Synchrotron User Information",
             namespace=ns,
             type=Schema.NONE,
             hidden=True)
-        ps = DatasetParameterSet.objects.get_or_create(
+        ps, created = DatasetParameterSet.objects.get_or_create(
             schema=schema, dataset=dataset)
-        pn_name = ParameterName.objects.get_or_create(
+        pn_name, created = ParameterName.objects.get_or_create(
             schema=schema,
             name='name',
             full_name='Full Name',
             data_type=ParameterName.STRING
         )
-        pn_email = ParameterName.objects.get_or_create(
+        pn_email, created = ParameterName.objects.get_or_create(
             schema=schema,
             name='email',
             full_name='email address',
             data_type=ParameterName.STRING
         )
-        pn_scientistid = ParameterName.objects.get_or_create(
+        pn_scientistid, created = ParameterName.objects.get_or_create(
             schema=schema,
             name='scientistid',
             full_name='ScientistID',
             data_type=ParameterName.STRING
         )
         data = box_data['usernames'][username]
-        p_name = DatasetParameter.objects.get_or_create(
+        p_name, created = DatasetParameter.objects.get_or_create(
             name=pn_name, parameterset=ps)
         if p_name.string_value is None or p_name.string_value == '':
             p_name.string_value = data['Name']
             p_name.save()
-        p_email = DatasetParameter.objects.get_or_create(
+        p_email, created = DatasetParameter.objects.get_or_create(
             name=pn_email, parameterset=ps)
         if p_email.string_value is None or p_name.string_value == '':
             p_email.string_value = data['Email']
             p_email.save()
-        p_scientistid = DatasetParameter.objects.get_or_create(
+        p_scientistid, created = DatasetParameter.objects.get_or_create(
             name=pn_scientistid, parameterset=ps)
         if p_scientistid.string_value is None or \
            p_scientistid.string_value == '':
@@ -128,20 +130,20 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
 
     def store_auto_id(dataset, auto_id):
         ns = 'http://synchrotron.org.au/autoprocessing/xds'
-        schema = Schema.objects.get_or_create(
+        schema, created = Schema.objects.get_or_create(
             name="Synchrotron Auto Processing Results",
             namespace=ns,
             type=Schema.NONE,
             hidden=True)
-        ps = DatasetParameterSet.objects.get_or_create(
+        ps, created = DatasetParameterSet.objects.get_or_create(
             schema=schema, dataset=dataset)
-        pn_mongoid = ParameterName.objects.get_or_create(
+        pn_mongoid, created = ParameterName.objects.get_or_create(
             schema=schema,
             name='mongo_id',
             full_name='Mongo DB ID',
             data_type=ParameterName.STRING
         )
-        p_mongoid = DatasetParameter.objects.get_or_create(
+        p_mongoid, created = DatasetParameter.objects.get_or_create(
             name=pn_mongoid, parameterset=ps)
         if p_mongoid.string_value is None or p_mongoid.string_value == '':
             p_mongoid.string_value = auto_id
