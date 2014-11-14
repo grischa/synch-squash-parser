@@ -5,6 +5,7 @@ import re
 from collections import deque
 from magic import Magic
 
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
 
 from tardis.tardis_portal.models import Dataset, DataFile, DataFileObject
@@ -53,8 +54,11 @@ def parse_squashfs_box_data(exp, squash_sbox, inst):
         info = ast.literal_eval(info_file.read())
 
     def transform_name(name):
+        '''
+        create short name from last name and first character of first name
+        '''
         f_name, l_name = name.split(' ')
-        u_name = l_name.replace('-', '') + f_name[0]
+        u_name = l_name + f_name[0]
         u_name = u_name.lower()
         return u_name
 
@@ -129,7 +133,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
             p_scientistid.save()
 
     def store_auto_id(dataset, auto_id):
-        ns = 'http://synchrotron.org.au/autoprocessing/xds'
+        ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
         schema, created = Schema.objects.get_or_create(
             name="Synchrotron Auto Processing Results",
             namespace=ns,
@@ -148,6 +152,28 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         if p_mongoid.string_value is None or p_mongoid.string_value == '':
             p_mongoid.string_value = auto_id
             p_mongoid.save()
+
+    def auto_processing_link(raw_dataset, auto_dataset):
+        auto_processing_schema = 'http://store.synchrotron.org.au/mx/auto_link'
+        schema, created = Schema.objects.get_or_create(
+            name="AU Synchrotron MX auto processing link",
+            namespace=auto_processing_schema,
+            type=Schema.DATASET,
+            hidden=False)
+        ps, created = DatasetParameterSet.objects.get_or_create(
+            schema=schema, dataset=raw_dataset)
+        pn, created = ParameterName.objects.get_or_create(
+            schema=schema,
+            name="auto processing results",
+            full_name="Link to dataset containing auto processing results",
+            data_type=ParameterName.LINK
+        )
+        par, created = DatasetParameter.objects.get_or_create(
+            name=pn,
+            parameterset=ps,
+            link_id=auto_dataset.id,
+            link_ct=ContentType.objects.get_for_model(Dataset)
+        )
 
     ignore_substrings = ['crystalpics', 'diffpics']
     for i_str in ignore_substrings:
@@ -244,7 +270,8 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
             if len(dir_list) > 0 and dir_list[0] == 'auto':
                 # store username somewhere for future
                 dataset_name = None
-                if len(dir_list) > 1 and dir_list[1] == 'index':
+                raw_dataset = None
+                if len(dir_list) > 2 and dir_list[1] == 'index':
                     auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
                                        '([0-9]+)(failed)?$'
                     match = re.findall(auto_index_regex, filepath)
@@ -271,9 +298,9 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                         img_dfos = DataFileObject.objects.filter(
                             uri__endswith=image_filename)
                         if len(img_dfos) > 0:
-                            dataset = img_dfos[0].datafile.dataset
+                            raw_dataset = img_dfos[0].datafile.dataset
                         # number_of_images = match[1]
-                elif len(dir_list) > 1 and dir_list[1] == 'dataset':
+                elif len(dir_list) > 2 and dir_list[1] == 'dataset':
                     auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                                     '([0-9]+)_([0-9a-fA-F]+)'
                     match = re.findall(auto_ds_regex, filepath)
@@ -300,18 +327,25 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                             img_dfos = DataFileObject.objects.filter(
                                 uri__startswith=dataset_path)
                             if len(img_dfos) > 0:
-                                dataset = img_dfos[0].datafile.dataset
+                                raw_dataset = img_dfos[0].datafile.dataset
                             if xds:
-                                store_auto_id(dataset, auto_id)
-                elif len(dir_list) > 1 and dir_list[1] == 'rickshaw':
-                    dataset = get_dataset('rickshaw_auto_processing')
+                                store_auto_id(raw_dataset, auto_id)
+                elif len(dir_list) > 2 and dir_list[1] == 'rickshaw':
+                    dataset = get_dataset('rickshaw auto processing')
                     # store like 'dataset' auto processing
                 if dataset is None and dataset_name is None:
                     dataset_name = 'other auto processing'
                 else:
-                    dataset_name += ' auto_id: %s' % auto_id
-                    dataset = dataset or get_dataset(
-                        dataset_name, directory='home/auto_processing')
+                    dataset_name += ' auto_processing'
+                    if raw_dataset is not None:
+                        auto_ds_dir = raw_dataset.directory
+                    else:
+                        auto_ds_dir = 'unidentified'
+                    dataset = get_dataset(
+                        dataset_name,
+                        directory='home/%s/auto_processing' % auto_ds_dir)
+                    if raw_dataset is not None:
+                        auto_processing_link(raw_dataset, dataset)
             else:
                 dataset = get_dataset(first_dir or 'other files',
                                       directory='home')
@@ -323,12 +357,19 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
     # - dataset
     # - filename
     # - directory
-    md5, sha512, size, mimetype_buffer = generate_file_checksums(
-        inst.open(filepath))
+    try:
+        md5, sha512, size, mimetype_buffer = generate_file_checksums(
+            inst.open(filepath))
+    except IOError as e:
+        log.debug('squash parse error')
+        log.debug(e)
+        return None
+
     mimetype = ''
     if len(mimetype_buffer) > 0:
         mimetype = Magic(mime=True).from_buffer(mimetype_buffer)
-    df_dict = {'dataset': dataset or get_dataset('other files', directory=''),
+    dataset = dataset or get_dataset('other files', directory='')
+    df_dict = {'dataset': dataset,
                'filename': filename,
                'directory': directory,
                'size': size,
