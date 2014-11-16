@@ -333,9 +333,9 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
                 elif len(dir_list) > 2 and dir_list[1] == 'rickshaw':
                     dataset = get_dataset('rickshaw auto processing')
                     # store like 'dataset' auto processing
-                if dataset is None and dataset_name is None:
-                    dataset_name = 'other auto processing'
-                else:
+                if dataset_name is None:
+                    dataset_name = 'other'
+                if dataset is None:
                     dataset_name += ' auto_processing'
                     if raw_dataset is not None:
                         auto_ds_dir = raw_dataset.directory
@@ -372,7 +372,7 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
     df_dict = {'dataset': dataset,
                'filename': filename,
                'directory': directory,
-               'size': size,
+               'size': str(size),
                'created_time': inst.created_time(filepath),
                'modification_time': inst.modified_time(filepath),
                'mimetype': mimetype,
