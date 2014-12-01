@@ -2,22 +2,80 @@ import ast
 import os
 import re
 
-from collections import deque
 from magic import Magic
 
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
 
-from tardis.tardis_portal.models import Dataset, DataFile, DataFileObject
-from tardis.tardis_portal.models import ParameterName, \
-    Schema, DatasetParameterSet, DatasetParameter
+from tardis.tardis_portal.models import (
+    Dataset, DataFile, DataFileObject,
+    ParameterName, DatafileParameterSet,
+    ExperimentParameter,
+    Schema, DatasetParameterSet, DatasetParameter,
+    StorageBox, StorageBoxOption
+)
 from tardis.tardis_portal.util import generate_file_checksums
 
 import logging
 log = logging.getLogger(__name__)
 
+IGNORE_PATH_SUBSTRINGS = ['crystalpics', 'diffpics']
 
-def parse_squashfs_box_data(exp, squash_sbox, inst):
+TYPICAL_HOME = {
+    'Desktop': {'description': 'Desktop folder'},
+    'Documents': {'description': 'Documents folder'},
+    'Downloads': {'description': 'Downloads folder'},
+    'IDLWorkspace': {'description': 'IDL Workspace folder',
+                     'ignore': True},
+    'Music': {'description': 'Music folder',
+              'ignore': True},
+    'Pictures': {'description': 'Pictures folder'},
+    'Public': {'description': 'Public folder'},
+    'Templates': {'description': 'Templates folder'},
+    'Videos': {'description': 'Videos folder'},
+    'areavision': {'description': 'Area Vision settings',
+                   'ignore': True},
+    'camera_settings': {'description': 'Camera settings',
+                        'ignore': True},
+    'chromium': {'description': 'Chromium folder',
+                 'ignore': True},
+    'edm_files': {'description': 'EDM files',
+                  'ignore': True},
+    'google-chrome': {'description': 'bad chrome symlink',
+                      'ignore': True},
+    'restart_logs': {'description': 'Restart logs',
+                     'ignore': True},
+    'sync': {'description': 'Sync folder',
+             'ignore': True},
+    'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
+                  'ignore': True},
+    '': {'description': 'other files'},
+}
+
+
+def get_or_create_storage_box(datafile):
+    key_name = 'datafile_id'
+    class_name = 'tardis.tardis_portal.storage.squashfs.SquashFSStorage'
+    try:
+        s_box = StorageBoxOption.objects.get(
+            key=key_name, value=datafile.id,
+            storage_box__django_storage_class=class_name).storage_box
+    except StorageBoxOption.DoesNotExist:
+        s_box = StorageBox(
+            django_storage_class=class_name,
+            max_size=datafile.size,
+            status='empty',
+            name=datafile.filename,
+            description='SquashFS Archive in DataFile id: %d, filename: %s' %
+            (datafile.id, datafile.filename)
+        )
+        s_box.save()
+        StorageBoxOption(key=key_name, value=datafile.id,
+                         storage_box=s_box).save()
+    return s_box
+
+
+def get_squashfs_metadata(squash_sbox):
     '''
     squash file metadata
 
@@ -50,6 +108,7 @@ def parse_squashfs_box_data(exp, squash_sbox, inst):
 
     '''
     info_path = 'frames/.info'
+    inst = squash_sbox.get_initialised_storage_instance()
     with inst.open(info_path) as info_file:
         info = ast.literal_eval(info_file.read())
 
@@ -73,290 +132,19 @@ def parse_squashfs_box_data(exp, squash_sbox, inst):
     return info
 
 
-def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
-                        directory, filename, filepath, box_data=None):
-
-    def get_dataset(name, directory=''):
-        dataset, created = Dataset.objects.get_or_create(
-            description=name, directory=directory)
-        if created:
-            dataset.save()
-            dataset.experiments.add(exp)
-        dataset.storage_boxes.add(squash_sbox)
-        return dataset
-
-    def tag_with_user_info(dataset, username):
-        if username not in box_data['usernames']:
-            return
-        ns = 'http://synchrotron.org.au/userinfo'
-        schema, created = Schema.objects.get_or_create(
-            name="Synchrotron User Information",
-            namespace=ns,
-            type=Schema.NONE,
-            hidden=True)
-        ps, created = DatasetParameterSet.objects.get_or_create(
-            schema=schema, dataset=dataset)
-        pn_name, created = ParameterName.objects.get_or_create(
-            schema=schema,
-            name='name',
-            full_name='Full Name',
-            data_type=ParameterName.STRING
-        )
-        pn_email, created = ParameterName.objects.get_or_create(
-            schema=schema,
-            name='email',
-            full_name='email address',
-            data_type=ParameterName.STRING
-        )
-        pn_scientistid, created = ParameterName.objects.get_or_create(
-            schema=schema,
-            name='scientistid',
-            full_name='ScientistID',
-            data_type=ParameterName.STRING
-        )
-        data = box_data['usernames'][username]
-        p_name, created = DatasetParameter.objects.get_or_create(
-            name=pn_name, parameterset=ps)
-        if p_name.string_value is None or p_name.string_value == '':
-            p_name.string_value = data['Name']
-            p_name.save()
-        p_email, created = DatasetParameter.objects.get_or_create(
-            name=pn_email, parameterset=ps)
-        if p_email.string_value is None or p_name.string_value == '':
-            p_email.string_value = data['Email']
-            p_email.save()
-        p_scientistid, created = DatasetParameter.objects.get_or_create(
-            name=pn_scientistid, parameterset=ps)
-        if p_scientistid.string_value is None or \
-           p_scientistid.string_value == '':
-            p_scientistid.string_value = data['ScientistID']
-            p_scientistid.save()
-
-    def store_auto_id(dataset, auto_id):
-        ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
-        schema, created = Schema.objects.get_or_create(
-            name="Synchrotron Auto Processing Results",
-            namespace=ns,
-            type=Schema.NONE,
-            hidden=True)
-        ps, created = DatasetParameterSet.objects.get_or_create(
-            schema=schema, dataset=dataset)
-        pn_mongoid, created = ParameterName.objects.get_or_create(
-            schema=schema,
-            name='mongo_id',
-            full_name='Mongo DB ID',
-            data_type=ParameterName.STRING
-        )
-        p_mongoid, created = DatasetParameter.objects.get_or_create(
-            name=pn_mongoid, parameterset=ps)
-        if p_mongoid.string_value is None or p_mongoid.string_value == '':
-            p_mongoid.string_value = auto_id
-            p_mongoid.save()
-
-    def auto_processing_link(raw_dataset, auto_dataset):
-        auto_processing_schema = 'http://store.synchrotron.org.au/mx/auto_link'
-        schema, created = Schema.objects.get_or_create(
-            name="AU Synchrotron MX auto processing link",
-            namespace=auto_processing_schema,
-            type=Schema.DATASET,
-            hidden=False)
-        ps, created = DatasetParameterSet.objects.get_or_create(
-            schema=schema, dataset=raw_dataset)
-        pn, created = ParameterName.objects.get_or_create(
-            schema=schema,
-            name="auto processing results",
-            full_name="Link to dataset containing auto processing results",
-            data_type=ParameterName.LINK
-        )
-        par, created = DatasetParameter.objects.get_or_create(
-            name=pn,
-            parameterset=ps,
-            link_id=auto_dataset.id,
-            link_ct=ContentType.objects.get_for_model(Dataset)
-        )
-
-    ignore_substrings = ['crystalpics', 'diffpics']
-    for i_str in ignore_substrings:
-        if filepath.find(i_str) > -1:
-            return None
-
-    def remove_dotslash(path):
-        if path[0:2] == './':
-            return path[2:]
-        return path
-
-    directory = remove_dotslash(directory)
-    filepath = remove_dotslash(filepath)
-    dir_list = deque(directory.split(os.sep))
-
-    exp_q = Q(datafile__dataset__experiments=exp)
-    path_part_match_q = Q(uri__endswith=filepath)
-    path_exact_match_q = Q(uri=filepath)
-    s_box_q = Q(storage_box=squash_sbox)
-    # check whether file has been registered already, stored elsewhere:
-    dfos = DataFileObject.objects.filter(exp_q, path_part_match_q,
-                                         ~s_box_q).select_related(
-                                             'datafile', 'datafile__dataset')
-    if len(dfos) == 1:
-        df = dfos[0].datafile
-        if df.dataset.directory is None or df.dataset.directory == '':
-            df.dataset.directory = directory
-            df.dataset.save()
-        df.add_original_path_tag(directory, replace=False)
-        if dir_list[0] == 'frames':
-            tag_with_user_info(df.dataset, dir_list[1])
-        return df
-    # file registered already
-    dfos = DataFileObject.objects.filter(exp_q, path_exact_match_q, s_box_q)
-    if len(dfos) == 1:
-        return dfos[0]
-
-    # basedirs = ['home', 'frames']
-
+def file_registered(experiment, s_box, filepath):
     try:
-        first_dir = dir_list.popleft()
-    except IndexError:
-        dataset = get_dataset('other files', directory='')
-    if first_dir != 'home':
-        # add image missed earlier
-        dataset = get_dataset('stray files')
-    else:
-        dataset = None
-        # first_dir == home
-        typical_home = {
-            'Desktop': {'description': 'Desktop folder'},
-            'Documents': {'description': 'Documents folder'},
-            'Downloads': {'description': 'Downloads folder'},
-            'IDLWorkspace': {'description': 'IDL Workspace folder',
-                             'ignore': True},
-            'Music': {'description': 'Music folder',
-                      'ignore': True},
-            'Pictures': {'description': 'Pictures folder'},
-            'Public': {'description': 'Public folder'},
-            'Templates': {'description': 'Templates folder'},
-            'Videos': {'description': 'Videos folder'},
-            'areavision': {'description': 'Area Vision settings',
-                           'ignore': True},
-            'camera_settings': {'description': 'Camera settings',
-                                'ignore': True},
-            'chromium': {'description': 'Chromium folder',
-                         'ignore': True},
-            'edm_files': {'description': 'EDM files',
-                          'ignore': True},
-            'google-chrome': {'description': 'bad chrome symlink',
-                              'ignore': True},
-            'restart_logs': {'description': 'Restart logs',
-                             'ignore': True},
-            'sync': {'description': 'Sync folder',
-                     'ignore': True},
-            'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
-                          'ignore': True},
-            '': {'description': 'other files'},
-        }
-        try:
-            second_dir = dir_list.popleft()
-        except IndexError:
-            second_dir = ''
-        in_list = typical_home.get(second_dir, False)
-        if in_list:
-            if in_list.get('ignore', False):
-                return None
-            dataset = get_dataset(in_list.get('dataset_name', second_dir),
-                                  directory='home')
-            directory = os.path.join(dir_list)
-        else:
-            # second_dir == username most likely
-            # dir_list == user files
-            if len(dir_list) > 0 and dir_list[0] == 'auto':
-                # store username somewhere for future
-                dataset_name = None
-                raw_dataset = None
-                if len(dir_list) > 2 and dir_list[1] == 'index':
-                    auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
-                                       '([0-9]+)(failed)?$'
-                    match = re.findall(auto_index_regex, filepath)
-                    if match:
-                        match = match[0]
-                        dataset_name = match[0]
+        DataFileObject.objects.get(
+            storage_box=s_box,
+            uri=filepath,
+            datafile__dataset__experiments=experiment)
+    except:
+        return False
+    return True
 
-                        # match index01.out file for
-                        #  image FILENAME:
-# /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
-                        filename_regex = ' image FILENAME: (.+)'
-                        index01_filename = os.path.join(
-                            first_dir, second_dir,
-                            dir_list[0], dir_list[1], dir_list[2],
-                            'index01.out')
-                        with inst.open(index01_filename, 'r') as indexfile:
-                            index01_contents = indexfile.read()
-                        image_filename_match = re.findall(filename_regex,
-                                                          index01_contents)
-                        if len(image_filename_match) == 1:
-                            image_filename = image_filename_match[0]
-                            image_filename = '/'.join(
-                                image_filename.split('/')[2:])
-                        img_dfos = DataFileObject.objects.filter(
-                            uri__endswith=image_filename)
-                        if len(img_dfos) > 0:
-                            raw_dataset = img_dfos[0].datafile.dataset
-                        # number_of_images = match[1]
-                elif len(dir_list) > 2 and dir_list[1] == 'dataset':
-                    auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
-                                    '([0-9]+)_([0-9a-fA-F]+)'
-                    match = re.findall(auto_ds_regex, filepath)
-                    if match:
-                        match = match[0]
-                        # example:
-                        # ('xds_process', 'p186_p16ds1_11', '300',
-                        #  '53e26bf7f6ddfc73ef2c09a8')
-                        xds = match[0] == 'xds_process'
-                        # store mongo id for xds ones
-                        dataset_name = match[1]
-                        # symlink matching
-                        # number_of_images = match[2]
-                        auto_id = match[3]
-                        if len(dir_list) > 2:
-                            # actual results, not summary files
-                            link_filename = inst.path(os.path.join(
-                                first_dir, second_dir,
-                                dir_list[0], dir_list[1], dir_list[2],
-                                'img'))
-                            dataset_path = os.readlink(link_filename)
-                            dataset_path = '/'.join(
-                                dataset_path.split('/')[2:])
-                            img_dfos = DataFileObject.objects.filter(
-                                uri__startswith=dataset_path)
-                            if len(img_dfos) > 0:
-                                raw_dataset = img_dfos[0].datafile.dataset
-                            if xds:
-                                store_auto_id(raw_dataset, auto_id)
-                elif len(dir_list) > 2 and dir_list[1] == 'rickshaw':
-                    dataset = get_dataset('rickshaw auto processing')
-                    # store like 'dataset' auto processing
-                if dataset_name is None:
-                    dataset_name = 'other'
-                if dataset is None:
-                    dataset_name += ' auto_processing'
-                    if raw_dataset is not None:
-                        auto_ds_dir = raw_dataset.directory
-                    else:
-                        auto_ds_dir = 'unidentified'
-                    dataset = get_dataset(
-                        dataset_name,
-                        directory='home/%s/auto_processing' % auto_ds_dir)
-                    if raw_dataset is not None:
-                        auto_processing_link(raw_dataset, dataset)
-            else:
-                dataset = get_dataset(first_dir or 'other files',
-                                      directory='home')
-            directory = os.path.join(second_dir, *dir_list)
-            tag_with_user_info(dataset, second_dir)
 
-    # to complete function need to set these vars above:
-    # - filepath
-    # - dataset
-    # - filename
-    # - directory
+def get_file_details(experiment, s_box, filepath):
+    inst = s_box.get_initialised_storage_instance()
     try:
         md5, sha512, size, mimetype_buffer = generate_file_checksums(
             inst.open(filepath))
@@ -364,28 +152,385 @@ def parse_squashfs_file(exp, squash_sbox, inst,  # noqa # too complex
         log.debug('squash parse error')
         log.debug(e)
         return None
+    existing_dfos = DataFileObject.objects.filter(
+        ~Q(storage_box=s_box),
+        datafile__dataset__experiments=experiment,
+        uri__endswith=filepath)
+    existing_df = None
+    for dfo in existing_dfos:
+        if dfo.datafile.size == size and dfo.datafile.md5sum == md5:
+            existing_df = dfo.datafile
+            break
+    return {
+        'existing_df': existing_df,
+        'md5': md5,
+        'sha512': sha512,
+        'size': size,
+        'mimetype_buffer': mimetype_buffer,
+        'created_time': inst.created_time(filepath),
+        'modification_time': inst.modified_time(filepath),
+    }
 
+
+def tag_with_user_info(dataset, metadata, username):
+    if username not in metadata['usernames']:
+        return
+    ns = 'http://synchrotron.org.au/userinfo'
+    schema, created = Schema.objects.get_or_create(
+        name="Synchrotron User Information",
+        namespace=ns,
+        type=Schema.NONE,
+        hidden=True)
+    ps, created = DatasetParameterSet.objects.get_or_create(
+        schema=schema, dataset=dataset)
+    pn_name, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name='name',
+        full_name='Full Name',
+        data_type=ParameterName.STRING
+    )
+    pn_email, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name='email',
+        full_name='email address',
+        data_type=ParameterName.STRING
+    )
+    pn_scientistid, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name='scientistid',
+        full_name='ScientistID',
+        data_type=ParameterName.STRING
+    )
+    data = metadata['usernames'][username]
+    p_name, created = DatasetParameter.objects.get_or_create(
+        name=pn_name, parameterset=ps)
+    if p_name.string_value is None or p_name.string_value == '':
+        p_name.string_value = data['Name']
+        p_name.save()
+    p_email, created = DatasetParameter.objects.get_or_create(
+        name=pn_email, parameterset=ps)
+    if p_email.string_value is None or p_name.string_value == '':
+        p_email.string_value = data['Email']
+        p_email.save()
+    p_scientistid, created = DatasetParameter.objects.get_or_create(
+        name=pn_scientistid, parameterset=ps)
+    if p_scientistid.string_value is None or \
+       p_scientistid.string_value == '':
+        p_scientistid.string_value = data['ScientistID']
+        p_scientistid.save()
+
+
+def create_datafile(dataset, basedir, filename, s_box, file_details):
     mimetype = ''
-    if len(mimetype_buffer) > 0:
-        mimetype = Magic(mime=True).from_buffer(mimetype_buffer)
-    dataset = dataset or get_dataset('other files', directory='')
+    if len(file_details['mimetype_buffer']) > 0:
+        mimetype = Magic(mime=True).from_buffer(
+            file_details['mimetype_buffer'])
+
     df_dict = {'dataset': dataset,
                'filename': filename,
-               'directory': directory,
-               'size': str(size),
-               'created_time': inst.created_time(filepath),
-               'modification_time': inst.modified_time(filepath),
+               'directory': basedir,
+               'size': str(file_details['size']),
+               'created_time': file_details['created_time'],
+               'modification_time': file_details['modified_time'],
                'mimetype': mimetype,
-               'md5sum': md5,
-               'sha512sum': sha512}
-    try:
-        df = DataFile.objects.get(directory=directory,
-                                  filename=filename,
-                                  dataset=dataset)
-        for key, value in df_dict.items():
-            setattr(df, key, value)
-    except DataFile.DoesNotExist:
-        df = DataFile(**df_dict)
+               'md5sum': file_details['md5'],
+               'sha512sum': file_details['sha512']}
+    df = DataFile(**df_dict)
     df.save()
-    df.add_original_path_tag(directory, replace=True)
     return df
+
+
+def parse_frames_file(basedir, filename, s_box):
+    dataset_ids = list(DataFileObject.objects.filter(uri__contains=basedir)
+                       .values_list('datafile__dataset__id', flat=True))
+    if len(dataset_ids) == 0:
+        ds = Dataset(description=basedir.split(os.sep)[-1],
+                     directory=basedir)
+        ds.save()
+    else:
+        dataset_id = max(set(dataset_ids), key=dataset_ids.count)
+        ds = Dataset.objects.get(id=dataset_id)
+
+    if ds.directory is None or ds.directory == '':
+        ds.directory = basedir
+        ds.save()
+    return ds
+
+
+def store_auto_id(dataset, auto_id):
+    ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
+    schema, created = Schema.objects.get_or_create(
+        name="Synchrotron Auto Processing Results",
+        namespace=ns,
+        type=Schema.NONE,
+        hidden=True)
+    ps, created = DatasetParameterSet.objects.get_or_create(
+        schema=schema, dataset=dataset)
+    pn_mongoid, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name='mongo_id',
+        full_name='Mongo DB ID',
+        data_type=ParameterName.STRING
+    )
+    p_mongoid, created = DatasetParameter.objects.get_or_create(
+        name=pn_mongoid, parameterset=ps)
+    if p_mongoid.string_value is None or p_mongoid.string_value == '':
+        p_mongoid.string_value = auto_id
+        p_mongoid.save()
+
+
+def get_or_create_dataset(description, directory, experiment):
+    existing = Dataset.objects.filter(description=description,
+                                      directory=directory,
+                                      experiments=experiment)
+    if len(existing) > 0:
+        return existing[0]
+    ds = Dataset(description=description,
+                 directory=directory)
+    ds.save()
+    ds.experiments.add(experiment)
+    return ds
+
+
+def auto_processing_link(raw_dataset, auto_dataset):
+    auto_processing_schema = 'http://store.synchrotron.org.au/mx/auto_link'
+    schema, created = Schema.objects.get_or_create(
+        name="AU Synchrotron MX auto processing link",
+        namespace=auto_processing_schema,
+        type=Schema.DATASET,
+        hidden=False)
+    ps, created = DatasetParameterSet.objects.get_or_create(
+        schema=schema, dataset=raw_dataset)
+    pn, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name="auto processing results",
+        full_name="Link to dataset containing auto processing results",
+        data_type=ParameterName.LINK
+    )
+    par, created = DatasetParameter.objects.get_or_create(
+        name=pn,
+        parameterset=ps,
+        link_id=auto_dataset.id,
+        link_ct=ContentType.objects.get_for_model(Dataset)
+    )
+
+
+def parse_auto_processing(basedir, filename, s_box,
+                          path_elements, experiment):
+    filepath = os.path.join(basedir, filename)
+    inst = s_box.get_initialised_storage_instance()
+    dataset_name = None
+    raw_dataset = None
+    if len(path_elements) > 3 and path_elements[3] == 'index':
+        auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
+                           '([0-9]+)(failed)?$'
+        match = re.findall(auto_index_regex, filepath)
+        if match:
+            match = match[0]
+            dataset_name = match[0] + 'auto processing'
+            directory = os.path.join(*path_elements[:4])
+            # match index01.out file for
+            #  image FILENAME:
+            # /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
+            filename_regex = ' image FILENAME: (.+)'
+            index01_filename = os.path.join(
+                path_elements[0],
+                path_elements[1],
+                path_elements[2],
+                path_elements[3],
+                path_elements[4],
+                'index01.out')
+            with inst.open(index01_filename, 'r') as indexfile:
+                index01_contents = indexfile.read()
+            image_filename_match = re.findall(filename_regex,
+                                              index01_contents)
+            if len(image_filename_match) == 1:
+                image_filename = image_filename_match[0]
+                image_filename = '/'.join(
+                    image_filename.split('/')[2:])
+            img_dfos = DataFileObject.objects.filter(
+                datafile__dataset__experiments=experiment,
+                uri__endswith=image_filename)
+            if len(img_dfos) > 0:
+                raw_dataset = img_dfos[0].datafile.dataset
+            # number_of_images = match[1]
+        else:
+            dataset_name = 'auto processing - unmatched'
+            directory = os.path.join(*os.path.join(path_elements[:3]))
+    elif len(path_elements) > 4 and path_elements[3] == 'dataset':
+        auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
+                        '([0-9]+)_([0-9a-fA-F]+)'
+        match = re.findall(auto_ds_regex, filepath)
+        if match:
+            match = match[0]
+            # example:
+            # ('xds_process', 'p186_p16ds1_11', '300',
+            #  '53e26bf7f6ddfc73ef2c09a8')
+            xds = match[0] == 'xds_process'
+            # store mongo id for xds ones
+            dataset_name = match[1] + 'auto processing'
+            directory = os.path.join(*path_elements[:4])
+            # symlink matching
+            # number_of_images = match[2]
+            auto_id = match[3]
+            if len(path_elements) > 4:
+                # actual results, not summary files
+                link_filename = inst.path(os.path.join(
+                    path_elements[0],
+                    path_elements[1],
+                    path_elements[2],
+                    path_elements[3],
+                    path_elements[4],
+                    'img'))
+                dataset_path = os.readlink(link_filename)
+                dataset_path = '/'.join(
+                    dataset_path.split('/')[2:])
+                img_dfos = DataFileObject.objects.filter(
+                    datafile__dataset__experiments=experiment,
+                    uri__startswith=dataset_path)
+                if len(img_dfos) > 0:
+                    raw_dataset = img_dfos[0].datafile.dataset
+                if xds:
+                    store_auto_id(raw_dataset, auto_id)
+        else:
+            dataset_name = 'auto processing - unmatched'
+            directory = os.path.join(*os.path.join(path_elements[:3]))
+    elif len(path_elements) > 4 and path_elements[3] == 'rickshaw':
+        dataset_name = 'auto rickshaw'
+        directory = os.path.join(*path_elements[:3])
+    else:
+        dataset_name = 'auto process - unmatched'
+        dir_length = min(len(path_elements), 4)
+        directory = os.path.join(*path_elements[:dir_length])
+    ds = get_or_create_dataset(
+        description=dataset_name,
+        directory=directory,
+        experiment=experiment)
+    if raw_dataset is not None:
+        auto_processing_link(raw_dataset, ds)
+    return ds
+
+
+def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
+                        metadata, experiment):
+    path_length = len(path_elements)
+
+    if path_length == 0:
+        first_dir = ''
+    else:
+        first_dir = path_elements[1]
+    # typical, see top of file for settings
+    typical = TYPICAL_HOME.get(first_dir, None)
+    if typical is not None:
+        if typical.get('ignore', False):
+            return None
+        ds_description = typical['description']
+        if path_length > 0:
+            directory = os.path.join(*path_elements[:1])
+        else:
+            directory = ''
+        ds = get_or_create_dataset(description=ds_description,
+                                   directory=directory,
+                                   experiment=experiment)
+    else:
+        # everything else
+        if path_length > 1 and path_elements[2] == 'auto':
+            ds = parse_auto_processing(
+                basedir, filename, s_box, path_elements, experiment)
+        else:
+            desc_length = 2 if path_length > 1 else 1
+            ds = get_or_create_dataset(
+                description=os.path.join(*path_elements[:desc_length]),
+                directory=os.path.join(*path_elements[:desc_length]),
+                experiment=experiment)
+    if path_length > 0:
+        tag_with_user_info(ds, metadata, path_elements[1])
+    return ds
+
+
+def parse_file(experiment, s_box, basedir, filename, metadata):
+    filepath = os.path.join(basedir, filename)
+
+    # ignore some files
+    for i_str in IGNORE_PATH_SUBSTRINGS:
+        if filepath.find(i_str) > -1:
+            return
+
+    if file_registered(experiment, s_box, filepath):
+        return
+
+    file_details = get_file_details(experiment, s_box, filepath)
+    if file_details['existing_df'] is not None:
+        df = file_details['existing_df']
+        ds = df.dataset
+        return df, ds
+
+    path_elements = basedir.split(os.sep)
+    ds = None
+    if len(path_elements) > 0:
+        first_dir = path_elements[0]
+        if first_dir == 'frames':
+            ds = parse_frames_file(
+                basedir, filename, s_box, file_details)
+            tag_with_user_info(ds, metadata, path_elements[1])
+        elif first_dir == 'home':
+            ds = parse_home_dir_file(basedir, filename, s_box,
+                                     path_elements, metadata, experiment)
+    if ds is None:
+        if len(path_elements) > 0:
+            directory = os.path.join(
+                *path_elements[:min(len(path_elements), 2)])
+        else:
+            directory = ''
+        ds = get_or_create_dataset(
+            description='other files',
+            directory=directory,
+            experiment=experiment)
+    df = create_datafile(ds, basedir, filename, s_box, file_details)
+    df.add_original_path_tag(basedir, replace=False)
+    if experiment not in ds.experiments.all():
+        ds.add(experiment)
+    return df, ds
+
+
+def remove_dotslash(path):
+    if path[0:2] == './':
+        return path[2:]
+    return path
+
+
+def parse_squashfs_file(squashfile, ns):
+    epn = DatafileParameterSet.objects.get(
+        datafile=squashfile,
+        schema__namespace=ns
+    ).datafileparameter_set.get(
+        name__name='EPN'
+    ).string_value
+
+    exp_ns = 'http://www.tardis.edu.au/schemas/as/experiment/2010/09/21'
+    parameter = ExperimentParameter.objects.get(
+        name__name='EPN',
+        name__schema__namespace=exp_ns,
+        string_value=epn)
+    experiment = parameter.parameterset.experiment
+    s_box = get_or_create_storage_box(squashfile)
+    metadata = get_squashfs_metadata(s_box)
+
+    sq_inst = s_box.get_initialised_storage_instance()
+    for basedir, dirs, files in sq_inst.walk():
+        for filename in files:
+            clean_basedir = remove_dotslash(basedir)
+            df, ds = parse_file(experiment, s_box,
+                                clean_basedir, filename,
+                                metadata)
+            uri = os.path.join(clean_basedir, filename)
+            dfos = DataFileObject.objects.filter(
+                datafile=df,
+                uri=uri,
+                storage_box=s_box)
+            if len(dfos) == 0:
+                dfo = DataFileObject(
+                    datafile=df,
+                    uri=uri,
+                    storage_box=s_box)
+                dfo.save()
