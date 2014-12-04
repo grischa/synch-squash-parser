@@ -143,7 +143,7 @@ def file_registered(experiment, s_box, filepath):
     return True
 
 
-def get_file_details(experiment, s_box, filepath):
+def get_file_details(experiment, s_box, filepath, filename):
     inst = s_box.get_initialised_storage_instance()
     try:
         md5, sha512, size, mimetype_buffer = generate_file_checksums(
@@ -151,16 +151,18 @@ def get_file_details(experiment, s_box, filepath):
     except IOError as e:
         log.debug('squash parse error')
         log.debug(e)
-        return None
-    existing_dfos = DataFileObject.objects.filter(
-        ~Q(storage_box=s_box),
-        datafile__dataset__experiments=experiment,
-        uri__endswith=filepath)
-    existing_df = None
-    for dfo in existing_dfos:
-        if dfo.datafile.size == size and dfo.datafile.md5sum == md5:
-            existing_df = dfo.datafile
-            break
+        if os.path.islink(inst.path(filepath)):
+            return None
+        raise
+        # return None
+    try:
+        existing_df = DataFile.objects.get(
+            filename=filename,
+            md5sum=md5,
+            size=size,
+            dataset__experiments=experiment)
+    except DataFile.DoesNotExist:
+        existing_df = None
     return {
         'existing_df': existing_df,
         'md5': md5,
@@ -221,6 +223,12 @@ def tag_with_user_info(dataset, metadata, username):
 
 
 def create_datafile(dataset, basedir, filename, s_box, file_details):
+    try:
+        df = DataFile.objects.get(
+            directory=basedir, filename=filename, dataset=dataset)
+        return df
+    except DataFile.DoesNotExist:
+        pass
     mimetype = ''
     if len(file_details['mimetype_buffer']) > 0:
         mimetype = Magic(mime=True).from_buffer(
@@ -327,18 +335,20 @@ def parse_auto_processing(basedir, filename, s_box,
         match = re.findall(auto_index_regex, filepath)
         if match:
             match = match[0]
+            if match[3] == 'failed':
+                return None
             dataset_name = match[0] + 'auto processing'
-            directory = os.path.join(*path_elements[:4])
+            directory = os.path.join(*path_elements[:3])
             # match index01.out file for
             #  image FILENAME:
             # /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
             filename_regex = ' image FILENAME: (.+)'
             index01_filename = os.path.join(
-                path_elements[0],
-                path_elements[1],
-                path_elements[2],
-                path_elements[3],
-                path_elements[4],
+                path_elements[0],  # 'home'
+                path_elements[1],  # username
+                path_elements[2],  # 'auto'
+                path_elements[3],  # 'index'
+                path_elements[4],  # name
                 'index01.out')
             with inst.open(index01_filename, 'r') as indexfile:
                 index01_contents = indexfile.read()
@@ -356,7 +366,8 @@ def parse_auto_processing(basedir, filename, s_box,
             # number_of_images = match[1]
         else:
             dataset_name = 'auto processing - unmatched'
-            directory = os.path.join(*os.path.join(path_elements[:3]))
+            directory = os.path.join(
+                *os.path.join(path_elements[:min(3, len(path_elements))]))
     elif len(path_elements) > 4 and path_elements[3] == 'dataset':
         auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                         '([0-9]+)_([0-9a-fA-F]+)'
@@ -369,7 +380,7 @@ def parse_auto_processing(basedir, filename, s_box,
             xds = match[0] == 'xds_process'
             # store mongo id for xds ones
             dataset_name = match[1] + 'auto processing'
-            directory = os.path.join(*path_elements[:4])
+            directory = os.path.join(*path_elements[:5])
             # symlink matching
             # number_of_images = match[2]
             auto_id = match[3]
@@ -394,7 +405,8 @@ def parse_auto_processing(basedir, filename, s_box,
                     store_auto_id(raw_dataset, auto_id)
         else:
             dataset_name = 'auto processing - unmatched'
-            directory = os.path.join(*os.path.join(path_elements[:3]))
+            directory = os.path.join(
+                *os.path.join(path_elements[:min(5, len(path_elements))]))
     elif len(path_elements) > 4 and path_elements[3] == 'rickshaw':
         dataset_name = 'auto rickshaw'
         directory = os.path.join(*path_elements[:3])
@@ -415,7 +427,7 @@ def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
                         metadata, experiment):
     path_length = len(path_elements)
 
-    if path_length == 0:
+    if path_length < 2:
         first_dir = ''
     else:
         first_dir = path_elements[1]
@@ -425,7 +437,7 @@ def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
         if typical.get('ignore', False):
             return None
         ds_description = typical['description']
-        if path_length > 0:
+        if path_length > 1:
             directory = os.path.join(*path_elements[:1])
         else:
             directory = ''
@@ -434,16 +446,16 @@ def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
                                    experiment=experiment)
     else:
         # everything else
-        if path_length > 1 and path_elements[2] == 'auto':
+        if path_length > 2 and path_elements[2] == 'auto':
             ds = parse_auto_processing(
                 basedir, filename, s_box, path_elements, experiment)
         else:
-            desc_length = 2 if path_length > 1 else 1
+            desc_length = 2 if path_length > 2 else 1
             ds = get_or_create_dataset(
                 description=os.path.join(*path_elements[:desc_length]),
                 directory=os.path.join(*path_elements[:desc_length]),
                 experiment=experiment)
-    if path_length > 0:
+    if path_length > 1 and ds is not None:
         tag_with_user_info(ds, metadata, path_elements[1])
     return ds
 
@@ -454,12 +466,14 @@ def parse_file(experiment, s_box, basedir, filename, metadata):
     # ignore some files
     for i_str in IGNORE_PATH_SUBSTRINGS:
         if filepath.find(i_str) > -1:
-            return
+            return None, None
 
     if file_registered(experiment, s_box, filepath):
-        return
+        return None, None
 
-    file_details = get_file_details(experiment, s_box, filepath)
+    file_details = get_file_details(experiment, s_box, filepath, filename)
+    if file_details is None:
+        return None, None
     if file_details['existing_df'] is not None:
         df = file_details['existing_df']
         ds = df.dataset
@@ -471,7 +485,7 @@ def parse_file(experiment, s_box, basedir, filename, metadata):
         first_dir = path_elements[0]
         if first_dir == 'frames':
             ds = parse_frames_file(
-                basedir, filename, s_box, file_details)
+                basedir, filename, s_box)
             tag_with_user_info(ds, metadata, path_elements[1])
         elif first_dir == 'home':
             ds = parse_home_dir_file(basedir, filename, s_box,
@@ -489,7 +503,7 @@ def parse_file(experiment, s_box, basedir, filename, metadata):
     df = create_datafile(ds, basedir, filename, s_box, file_details)
     df.add_original_path_tag(basedir, replace=False)
     if experiment not in ds.experiments.all():
-        ds.add(experiment)
+        ds.experiments.add(experiment)
     return df, ds
 
 
@@ -523,6 +537,8 @@ def parse_squashfs_file(squashfile, ns):
             df, ds = parse_file(experiment, s_box,
                                 clean_basedir, filename,
                                 metadata)
+            if df is None or ds is None:
+                continue
             uri = os.path.join(clean_basedir, filename)
             dfos = DataFileObject.objects.filter(
                 datafile=df,
