@@ -170,7 +170,7 @@ def get_file_details(experiment, s_box, filepath, filename):
         'size': size,
         'mimetype_buffer': mimetype_buffer,
         'created_time': inst.created_time(filepath),
-        'modification_time': inst.modified_time(filepath),
+        'modified_time': inst.modified_time(filepath),
     }
 
 
@@ -338,7 +338,8 @@ def parse_auto_processing(basedir, filename, s_box,
             if match[3] == 'failed':
                 return None
             dataset_name = match[0] + 'auto processing'
-            directory = os.path.join(*path_elements[:3])
+            directory = os.path.join(
+                *path_elements[:min(5, len(path_elements))])
             # match index01.out file for
             #  image FILENAME:
             # /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
@@ -367,7 +368,7 @@ def parse_auto_processing(basedir, filename, s_box,
         else:
             dataset_name = 'auto processing - unmatched'
             directory = os.path.join(
-                *os.path.join(path_elements[:min(3, len(path_elements))]))
+                *os.path.join(path_elements[:min(5, len(path_elements))]))
     elif len(path_elements) > 4 and path_elements[3] == 'dataset':
         auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                         '([0-9]+)_([0-9a-fA-F]+)'
@@ -380,7 +381,8 @@ def parse_auto_processing(basedir, filename, s_box,
             xds = match[0] == 'xds_process'
             # store mongo id for xds ones
             dataset_name = match[1] + 'auto processing'
-            directory = os.path.join(*path_elements[:5])
+            directory = os.path.join(
+                *path_elements[:min(5, len(path_elements))])
             # symlink matching
             # number_of_images = match[2]
             auto_id = match[3]
@@ -409,10 +411,10 @@ def parse_auto_processing(basedir, filename, s_box,
                 *os.path.join(path_elements[:min(5, len(path_elements))]))
     elif len(path_elements) > 4 and path_elements[3] == 'rickshaw':
         dataset_name = 'auto rickshaw'
-        directory = os.path.join(*path_elements[:3])
+        directory = os.path.join(*path_elements[:4])
     else:
         dataset_name = 'auto process - unmatched'
-        dir_length = min(len(path_elements), 4)
+        dir_length = min(len(path_elements), 5)
         directory = os.path.join(*path_elements[:dir_length])
     ds = get_or_create_dataset(
         description=dataset_name,
