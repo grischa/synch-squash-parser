@@ -403,8 +403,8 @@ def parse_auto_processing(basedir, filename, s_box,
                     uri__startswith=dataset_path)
                 if len(img_dfos) > 0:
                     raw_dataset = img_dfos[0].datafile.dataset
-                if xds:
-                    store_auto_id(raw_dataset, auto_id)
+                    if xds:
+                        store_auto_id(raw_dataset, auto_id)
         else:
             dataset_name = 'auto processing - unmatched'
             directory = os.path.join(
