@@ -185,6 +185,8 @@ def get_file_details(experiment, s_box, filepath, basedir, filename):
 
 
 def tag_with_user_info(dataset, metadata, username):
+    if 'usernames' not in metadata:
+        return
     if username not in metadata['usernames']:
         return
     ns = 'http://synchrotron.org.au/userinfo'
@@ -455,9 +457,9 @@ def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
             return None
         ds_description = typical['description']
         if path_length > 1:
-            directory = os.path.join(*path_elements[:1])
+            directory = os.path.join(*path_elements[:2])
         else:
-            directory = ''
+            directory = 'home'
         ds = get_or_create_dataset(description=ds_description,
                                    directory=directory,
                                    experiment=experiment)
