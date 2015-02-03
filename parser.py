@@ -5,7 +5,6 @@ import re
 from magic import Magic
 
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import Q
 
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
@@ -18,39 +17,6 @@ from tardis.tardis_portal.util import generate_file_checksums
 
 import logging
 log = logging.getLogger(__name__)
-
-IGNORE_PATH_SUBSTRINGS = ['crystalpics', 'diffpics']
-
-TYPICAL_HOME = {
-    'Desktop': {'description': 'Desktop folder'},
-    'Documents': {'description': 'Documents folder'},
-    'Downloads': {'description': 'Downloads folder'},
-    'IDLWorkspace': {'description': 'IDL Workspace folder',
-                     'ignore': True},
-    'Music': {'description': 'Music folder',
-              'ignore': True},
-    'Pictures': {'description': 'Pictures folder'},
-    'Public': {'description': 'Public folder'},
-    'Templates': {'description': 'Templates folder'},
-    'Videos': {'description': 'Videos folder'},
-    'areavision': {'description': 'Area Vision settings',
-                   'ignore': True},
-    'camera_settings': {'description': 'Camera settings',
-                        'ignore': True},
-    'chromium': {'description': 'Chromium folder',
-                 'ignore': True},
-    'edm_files': {'description': 'EDM files',
-                  'ignore': True},
-    'google-chrome': {'description': 'bad chrome symlink',
-                      'ignore': True},
-    'restart_logs': {'description': 'Restart logs',
-                     'ignore': True},
-    'sync': {'description': 'Sync folder',
-             'ignore': True},
-    'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
-                  'ignore': True},
-    '': {'description': 'other files'},
-}
 
 
 def get_or_create_storage_box(datafile):
@@ -132,58 +98,6 @@ def get_squashfs_metadata(squash_sbox):
     return info
 
 
-def file_registered(experiment, s_box, filepath):
-    try:
-        DataFileObject.objects.get(
-            storage_box=s_box,
-            uri=filepath,
-            datafile__dataset__experiments=experiment)
-    except:
-        return False
-    return True
-
-
-def get_file_details(experiment, s_box, filepath, basedir, filename):
-    inst = s_box.get_initialised_storage_instance()
-    try:
-        md5, sha512, size, mimetype_buffer = generate_file_checksums(
-            inst.open(filepath))
-    except IOError as e:
-        log.debug('squash parse error')
-        log.debug(e)
-        if os.path.islink(inst.path(filepath)):
-            return None
-        raise
-        # return None
-    try:
-        existing_dfs = DataFile.objects.filter(
-            filename=filename,
-            md5sum=md5,
-            size=size,
-            dataset__experiments=experiment)
-        nodir = existing_dfs.filter(directory='')
-        samedir = existing_dfs.filter(directory=basedir)
-        if nodir.count() == 1:
-            existing_df = nodir[0]
-            existing_df.directory = basedir
-            existing_df.save()
-        elif samedir.count() == 1:
-            existing_df = samedir[0]
-        else:
-            existing_df = None
-    except DataFile.DoesNotExist:
-        existing_df = None
-    return {
-        'existing_df': existing_df,
-        'md5': md5,
-        'sha512': sha512,
-        'size': size,
-        'mimetype_buffer': mimetype_buffer,
-        'created_time': inst.created_time(filepath),
-        'modified_time': inst.modified_time(filepath),
-    }
-
-
 def tag_with_user_info(dataset, metadata, username):
     if 'usernames' not in metadata:
         return
@@ -234,52 +148,6 @@ def tag_with_user_info(dataset, metadata, username):
         p_scientistid.save()
 
 
-def create_datafile(dataset, basedir, filename, s_box, file_details):
-    try:
-        df = DataFile.objects.get(
-            directory=basedir, filename=filename, dataset=dataset)
-        return df
-    except DataFile.DoesNotExist:
-        pass
-    mimetype = ''
-    if len(file_details['mimetype_buffer']) > 0:
-        mimetype = Magic(mime=True).from_buffer(
-            file_details['mimetype_buffer'])
-
-    df_dict = {'dataset': dataset,
-               'filename': filename,
-               'directory': basedir,
-               'size': str(file_details['size']),
-               'created_time': file_details['created_time'],
-               'modification_time': file_details['modified_time'],
-               'mimetype': mimetype,
-               'md5sum': file_details['md5'],
-               'sha512sum': file_details['sha512']}
-    df = DataFile(**df_dict)
-    df.save()
-    return df
-
-
-def parse_frames_file(basedir, filename, s_box, experiment):
-    dataset_ids = list(DataFileObject.objects
-                       .filter(uri__contains=basedir,
-                               datafile__dataset__experiments=experiment)
-                       .values_list('datafile__dataset__id', flat=True))
-    if len(dataset_ids) == 0:
-        ds = Dataset(description=basedir.split(os.sep)[-1],
-                     directory=basedir)
-        ds.save()
-        ds.experiments.add(experiment)
-    else:
-        dataset_id = max(set(dataset_ids), key=dataset_ids.count)
-        ds = Dataset.objects.get(id=dataset_id)
-
-    if ds.directory is None or ds.directory == '':
-        ds.directory = basedir
-        ds.save()
-    return ds
-
-
 def store_auto_id(dataset, auto_id):
     ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
     schema, created = Schema.objects.get_or_create(
@@ -300,19 +168,6 @@ def store_auto_id(dataset, auto_id):
     if p_mongoid.string_value is None or p_mongoid.string_value == '':
         p_mongoid.string_value = auto_id
         p_mongoid.save()
-
-
-def get_or_create_dataset(description, directory, experiment):
-    existing = Dataset.objects.filter(description=description,
-                                      directory=directory,
-                                      experiments=experiment)
-    if len(existing) > 0:
-        return existing[0]
-    ds = Dataset(description=description,
-                 directory=directory)
-    ds.save()
-    ds.experiments.add(experiment)
-    return ds
 
 
 def auto_processing_link(raw_dataset, auto_dataset):
@@ -442,131 +297,310 @@ def parse_auto_processing(basedir, filename, s_box,
     return ds
 
 
-def parse_home_dir_file(basedir, filename, s_box, path_elements,  # noqa
-                        metadata, experiment):
-    path_length = len(path_elements)
-
-    if path_length < 2:
-        first_dir = ''
-    else:
-        first_dir = path_elements[1]
-    # typical, see top of file for settings
-    typical = TYPICAL_HOME.get(first_dir, None)
-    if typical is not None:
-        if typical.get('ignore', False):
-            return None
-        ds_description = typical['description']
-        if path_length > 1:
-            directory = os.path.join(*path_elements[:2])
-        else:
-            directory = 'home'
-        ds = get_or_create_dataset(description=ds_description,
-                                   directory=directory,
-                                   experiment=experiment)
-    else:
-        # everything else
-        if path_length > 2 and path_elements[2] == 'auto':
-            ds = parse_auto_processing(
-                basedir, filename, s_box, path_elements, experiment)
-        else:
-            desc_length = 2 if path_length > 2 else 1
-            ds = get_or_create_dataset(
-                description=os.path.join(*path_elements[:desc_length]),
-                directory=os.path.join(*path_elements[:desc_length]),
-                experiment=experiment)
-    if path_length > 1 and ds is not None:
-        tag_with_user_info(ds, metadata, path_elements[1])
-    return ds
-
-
-def parse_file(experiment, s_box, basedir, filename, metadata):
-    filepath = os.path.join(basedir, filename)
-
-    # ignore some files
-    for i_str in IGNORE_PATH_SUBSTRINGS:
-        if filepath.find(i_str) > -1:
-            return None, None
-
-    if file_registered(experiment, s_box, filepath):
-        return None, None
-
-    file_details = get_file_details(experiment, s_box, filepath,
-                                    basedir, filename)
-    if file_details is None:
-        return None, None
-    if file_details['existing_df'] is not None:
-        df = file_details['existing_df']
-        ds = df.dataset
-        return df, ds
-
-    path_elements = basedir.split(os.sep)
-    ds = None
-    if len(path_elements) > 0:
-        first_dir = path_elements[0]
-        if first_dir == 'frames':
-            ds = parse_frames_file(
-                basedir, filename, s_box, experiment)
-            tag_with_user_info(ds, metadata, path_elements[1])
-        elif first_dir == 'home':
-            ds = parse_home_dir_file(basedir, filename, s_box,
-                                     path_elements, metadata, experiment)
-    if ds is None:
-        if len(path_elements) > 0:
-            directory = os.path.join(
-                *path_elements[:min(len(path_elements), 2)])
-        else:
-            directory = ''
-        ds = get_or_create_dataset(
-            description='other files',
-            directory=directory,
-            experiment=experiment)
-    df = create_datafile(ds, basedir, filename, s_box, file_details)
-    df.add_original_path_tag(basedir, replace=False)
-    if experiment not in ds.experiments.all():
-        ds.experiments.add(experiment)
-    return df, ds
-
-
 def remove_dotslash(path):
     if path[0:2] == './':
         return path[2:]
     return path
 
 
-def parse_squashfs_file(squashfile, ns):
-    epn = DatafileParameterSet.objects.get(
-        datafile=squashfile,
-        schema__namespace=ns
-    ).datafileparameter_set.get(
-        name__name='EPN'
-    ).string_value
+def update_dataset(dataset, top):
+    if not dataset.directory.startswith(top):
+        dataset.directory = top
+        dataset.save()
 
-    exp_ns = 'http://www.tardis.edu.au/schemas/as/experiment/2010/09/21'
-    parameter = ExperimentParameter.objects.get(
-        name__name='EPN',
-        name__schema__namespace=exp_ns,
-        string_value=epn)
-    experiment = parameter.parameterset.experiment
-    s_box = get_or_create_storage_box(squashfile)
-    metadata = get_squashfs_metadata(s_box)
 
-    sq_inst = s_box.get_initialised_storage_instance()
-    for basedir, dirs, files in sq_inst.walk():
-        for filename in files:
-            clean_basedir = remove_dotslash(basedir)
-            df, ds = parse_file(experiment, s_box,
-                                clean_basedir, filename,
-                                metadata)
-            if df is None or ds is None:
+class ASSquashParser(object):
+    '''
+    if frames:
+        files: .info
+        directories:
+            if calibration:
+                all into calibration dataset
+            else:
+                if existing:
+                    update existing dataset with directory
+                else:
+                    add file to 'missing'
+    elif home:
+        files: if not in ignore list: add to 'home'
+        directories:
+            if in ignore list: ignore
+            else traverse:
+                directories:
+                    if handler defined: use handler
+                    else add as dataset
+                files:
+                    if handler defined: use handler
+                    else add to 'home' dataset
+    else:
+        add all to 'other'
+
+    '''
+
+    frames_ignore_paths = ['crystalpics', 'diffpics']
+
+    typical_home = {
+        'Desktop': {'description': 'Desktop folder'},
+        'Documents': {'description': 'Documents folder'},
+        'Downloads': {'description': 'Downloads folder'},
+        'IDLWorkspace': {'description': 'IDL Workspace folder',
+                         'ignore': True},
+        'Music': {'description': 'Music folder',
+                  'ignore': True},
+        'Pictures': {'description': 'Pictures folder'},
+        'Public': {'description': 'Public folder'},
+        'Templates': {'description': 'Templates folder'},
+        'Videos': {'description': 'Videos folder'},
+        'areavision': {'description': 'Area Vision settings',
+                       'ignore': True},
+        'camera_settings': {'description': 'Camera settings',
+                            'ignore': True},
+        'chromium': {'description': 'Chromium folder',
+                     'ignore': True},
+        'edm_files': {'description': 'EDM files',
+                      'ignore': True},
+        'google-chrome': {'description': 'bad chrome symlink',
+                          'ignore': True},
+        'restart_logs': {'description': 'Restart logs',
+                         'ignore': True},
+        'sync': {'description': 'Sync folder',
+                 'ignore': True},
+        'xtal_info': {'description': 'Xtal info folder (Xtalview?)',
+                      'ignore': True},
+        '': {'description': 'other files'},
+    }
+
+    def __init__(self, squashfile, ns):
+        self.epn = DatafileParameterSet.objects.get(
+            datafile=squashfile,
+            schema__namespace=ns
+        ).datafileparameter_set.get(
+            name__name='EPN'
+        ).string_value
+
+        exp_ns = 'http://www.tardis.edu.au/schemas/as/experiment/2010/09/21'
+        parameter = ExperimentParameter.objects.get(
+            name__name='EPN',
+            name__schema__namespace=exp_ns,
+            string_value=self.epn)
+        self.experiment = parameter.parameterset.experiment
+        self.s_box = get_or_create_storage_box(squashfile)
+        self.metadata = get_squashfs_metadata(self.s_box)
+
+        self.sq_inst = self.s_box.get_initialised_storage_instance()
+
+    def parse(self):
+        top = '.'
+        dirnames, filenames = self.listdir('.')
+        def_dataset = self.get_or_create_dataset('other files')
+        result = self.add_files(top, filenames, def_dataset)
+        for dirname in dirnames:
+            if dirname == 'frames':
+                result = result and self.parse_frames()
+            elif dirname == 'home':
+                result = result and self.parse_home()
+        return result
+
+    def parse_frames(self):
+        '''
+        add calibration frames to calibration dataset
+        add all other files without changes
+        '''
+        top = 'frames'
+        dirnames, filenames = self.listdir(top)
+        result = self.add_files(top, filenames)
+        if 'calibration' in dirnames:
+            cal_dataset = self.get_or_create_dataset(
+                'calibration', os.path.join(top, 'calibration'))
+            result = result and self.add_subdir(top, cal_dataset)
+            dirnames.remove('calibration')
+        return result and all([self.add_subdir(os.path.join(top, dirname),
+                                               ignore=self.frames_ignore_paths)
+                               for dirname in dirnames])
+
+    def parse_home(self):
+        top = 'home'
+        dirnames, filenames = self.listdir(top)
+        home_dataset = self.get_or_create_dataset('home folder', top)
+        result = self.add_files(top, filenames, home_dataset)
+        for dirname in set(dirnames) & set(self.typical_home.keys()):
+            if self.typical_home['dirname']['ignore']:
                 continue
-            uri = os.path.join(clean_basedir, filename)
-            dfos = DataFileObject.objects.filter(
-                datafile=df,
-                uri=uri,
-                storage_box=s_box)
-            if len(dfos) == 0:
-                dfo = DataFileObject(
-                    datafile=df,
-                    uri=uri,
-                    storage_box=s_box)
-                dfo.save()
+            dataset = self.get_or_create_dataset(
+                self.typical_home['description'],
+                os.path.join(top, dirname))
+            result = result and self.add_subdir(os.path.join(top, dirname),
+                                                dataset)
+        for dirname in set(dirnames) - set(self.typical_home.keys()):
+            result = result and self.parse_user_dir(dirname)
+        return result
+
+    def parse_user_dir(self, userdir):
+        top = os.path.join('home', userdir)
+        dirnames, filenames = self.listdir(top)
+        user_dataset = self.get_or_create_dataset(
+            'home/%s' % userdir, top)
+        result = self.add_files(top, filenames, user_dataset)
+        if 'auto' in dirnames:
+            result = result and self.parse_auto_processing(userdir)
+            dirnames.remove('auto')
+        return result and all([
+            self.add_subdir(os.path.join(top, dirname), user_dataset)
+            for dirname in dirnames])
+
+    def parse_auto_processing(self, userdir):
+        top = os.path.join('home', userdir, 'auto')
+
+
+
+    def add_file(self, top, filename, dataset=None):
+        if self.find_existing_dfo(top, filename):
+            return True
+        else:
+            return self.create_dfo(top, filename, dataset)
+
+    def add_files(self, top, filenames, dataset=None):
+        return all([self.add_file(top, filename, dataset)
+                    for filename in filenames])
+
+    def add_subdir(self, subdir, dataset=None, ignore=None):
+        '''
+        add a subdirectory and all children
+        ignore folders that are defined in the ignore list
+        '''
+        dirnames, filenames = self.listdir(subdir)
+        if ignore is not None:
+            for path in ignore:
+                if path in dirnames:
+                    dirnames.remove(path)
+        result = all([self.add_file(subdir, filename, dataset)
+                      for filename in filenames])
+        return result and all([self.add_subdir(dirname, dataset)
+                               for dirname in dirnames])
+
+    def create_dfo(self, top, filename, dataset=None):
+        '''
+        create dfo and datafile if necessary
+        '''
+        df, df_data = self.find_datafile(top, filename)
+        if df:
+            if df.dataset != dataset:
+                df.dataset = dataset
+                df.save()
+            update_dataset(df.dataset, top)
+        else:
+            if dataset is None:
+                dataset = self.get_or_create_dataset('lost and found')
+            df = DataFile(
+                dataset=dataset,
+                filename=filename,
+                directory=top,
+                **df_data)
+            df.save()
+        dfo = DataFileObject(
+            datafile=df,
+            storage_box=self.s_box,
+            uri=os.path.join(top, filename)
+        )
+        dfo.save()
+        return True
+
+    def find_datafile(self, top, filename):
+        fullpath = os.path.join(top, filename)
+        # df_data usually is {md5, sha512, size, mimetype_buffer}
+        df_data = self.get_file_details(
+            top, filename)
+        try:
+            existing_dfs = DataFile.objects.filter(
+                filename=filename,
+                md5sum=df_data['md5'],
+                size=df_data['size'],
+                dataset__experiments=self.experiment)
+            nodir = existing_dfs.filter(directory='')
+            samedir = existing_dfs.filter(directory=top)
+            if nodir.count() == 1:
+                existing_df = nodir[0]
+                existing_df.directory = top
+                existing_df.save()
+            elif samedir.count() == 1:
+                existing_df = samedir[0]
+            else:
+                existing_df = None
+        except DataFile.DoesNotExist:
+            existing_df = None
+        df_data.update({
+            'created_time': self.sq_inst.created_time(fullpath),
+            'modification_time': self.sq_inst.modified_time(fullpath),
+            # 'modified_time' is more standard, but will stick with df model
+        })
+        return existing_df, df_data
+
+    def find_existing_dfo(self, top, filename):
+        try:
+            dfo = DataFileObject.objects.get(
+                storage_box=self.s_box,
+                uri=os.path.join(top, filename),
+                datafile__dataset__experiments=self.experiment)
+        except DataFileObject.DoesNotExist:
+            dfo = False
+        if dfo:
+            update_dataset(dfo.datafile.dataset, top)
+            return True
+        return False
+
+    def get_file_details(self, top, filename):
+        fullpath = os.path.join(top, filename)
+        try:
+            md5, sha512, size, mimetype_buffer = generate_file_checksums(
+                self.sq_inst.open(fullpath))
+        except IOError as e:
+            log.debug('squash parse error')
+            log.debug(e)
+            if os.path.islink(self.sq_inst.path(fullpath)):
+                return {}
+            raise
+        mimetype = Magic(mime=True).from_buffer(mimetype_buffer or '')
+        return {'size': str(size),
+                'mimetype': mimetype,
+                'md5sum': md5,
+                'sha512sum': sha512}
+
+    def get_or_create_dataset(self, name, top=None):
+        '''
+        returns existing or created dataset given a name
+
+        returns False if the dataset is not unique by name
+
+        top is the directory
+        '''
+        ds = Dataset.objects.filter(
+            description=name, experiments=self.experiment)
+        if len(ds) == 1:
+            return ds[0]
+        elif len(ds) > 1:
+            return False
+        ds = Dataset(description=name)
+        if top is not None:
+            ds.directory = top
+        ds.save()
+        ds.experiments.add(self.experiment)
+        return ds
+
+    def listdir(self, top):
+        try:
+            dirnames, filenames = self.sq_inst.listdir(top)
+        except os.error as err:
+            log.debug(err)
+            return [], []
+        dirnames = [d for d in dirnames if not d.startswith('.')]
+        filenames = [f for f in filenames if not f.startswith('.')]
+        return dirnames, filenames
+
+
+def parse_squashfs_file(squashfile, ns):
+    '''
+    parse Australian Synchrotron specific SquashFS archive files
+    '''
+
+    parser = ASSquashParser(squashfile, ns)
+    return parser.parse()
