@@ -8,7 +8,7 @@ from django.contrib.contenttypes.models import ContentType
 
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
-    ParameterName, DatafileParameterSet,
+    ParameterName, DatafileParameterSet, DatafileParameter,
     ExperimentParameter,
     Schema, DatasetParameterSet, DatasetParameter,
     StorageBox, StorageBoxOption
@@ -170,77 +170,13 @@ def store_auto_id(dataset, auto_id):
         p_mongoid.save()
 
 
-def auto_processing_link(raw_dataset, auto_dataset):
-    auto_processing_schema = 'http://store.synchrotron.org.au/mx/auto_link'
-    schema, created = Schema.objects.get_or_create(
-        name="AU Synchrotron MX auto processing link",
-        namespace=auto_processing_schema,
-        type=Schema.DATASET,
-        hidden=False)
-    ps, created = DatasetParameterSet.objects.get_or_create(
-        schema=schema, dataset=raw_dataset)
-    pn, created = ParameterName.objects.get_or_create(
-        schema=schema,
-        name="auto processing results",
-        full_name="Link to dataset containing auto processing results",
-        data_type=ParameterName.LINK
-    )
-    par, created = DatasetParameter.objects.get_or_create(
-        name=pn,
-        parameterset=ps,
-        link_id=auto_dataset.id,
-        link_ct=ContentType.objects.get_for_model(Dataset)
-    )
-
-
 def parse_auto_processing(basedir, filename, s_box,
                           path_elements, experiment):
     filepath = os.path.join(basedir, filename)
     inst = s_box.get_initialised_storage_instance()
     dataset_name = None
     raw_dataset = None
-    if len(path_elements) > 3 and path_elements[3] == 'index':
-        auto_index_regex = '([A-Za-z0-9_]+)_([0-9]+)_' \
-                           '([0-9]+)(failed)?$'
-        match = re.findall(auto_index_regex, filepath)
-        if match:
-            match = match[0]
-            if match[3] == 'failed':
-                return None
-            dataset_name = match[0] + ' auto processing'
-            directory = os.path.join(
-                *path_elements[:min(5, len(path_elements))])
-            # match index01.out file for
-            #  image FILENAME:
-            # /data/8020l/frames/calibration/test_crystal/testcrystal_0_001.img
-            filename_regex = ' image FILENAME: (.+)'
-            index01_filename = os.path.join(
-                path_elements[0],  # 'home'
-                path_elements[1],  # username
-                path_elements[2],  # 'auto'
-                path_elements[3],  # 'index'
-                path_elements[4],  # name
-                'index01.out')
-            with inst.open(index01_filename, 'r') as indexfile:
-                index01_contents = indexfile.read()
-            image_filename_match = re.findall(filename_regex,
-                                              index01_contents)
-            if len(image_filename_match) == 1:
-                image_filename = image_filename_match[0]
-                image_filename = '/'.join(
-                    image_filename.split('/')[2:])
-            img_dfos = DataFileObject.objects.filter(
-                datafile__dataset__experiments=experiment,
-                uri__endswith=image_filename)
-            if len(img_dfos) > 0:
-                raw_dataset = img_dfos[0].datafile.dataset
-            # number_of_images = match[1]
-        else:
-            naming_dir_i = min(5, len(path_elements))
-            dataset_name = 'auto processing - %s' % path_elements[naming_dir_i]
-            directory = os.path.join(
-                *os.path.join(path_elements[:naming_dir_i]))
-    elif len(path_elements) > 4 and path_elements[3] == 'dataset':
+    if len(path_elements) > 4 and path_elements[3] == 'dataset':
         auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
                         '([0-9]+)_([0-9a-fA-F]+)'
         match = re.findall(auto_ds_regex, filepath)
@@ -307,6 +243,52 @@ def update_dataset(dataset, top):
     if not dataset.directory.startswith(top):
         dataset.directory = top
         dataset.save()
+
+
+def auto_indexing_link(raw_datafile, indexing_dataset):
+    auto_processing_schema = 'http://store.synchrotron.org.au/mx/indexing_link'
+    schema, created = Schema.objects.get_or_create(
+        name="AU Synchrotron MX auto indexing link",
+        namespace=auto_processing_schema,
+        type=Schema.DATAFILE,
+        hidden=False)
+    ps, created = DatafileParameterSet.objects.get_or_create(
+        schema=schema, datafile=raw_datafile)
+    pn, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name="auto indexing results",
+        full_name="Link to dataset containing auto indexing results",
+        data_type=ParameterName.LINK
+    )
+    par, created = DatafileParameter.objects.get_or_create(
+        name=pn,
+        parameterset=ps,
+        link_id=indexing_dataset.id,
+        link_ct=ContentType.objects.get_for_model(Dataset)
+    )
+
+
+def auto_processing_link(raw_dataset, auto_dataset):
+    auto_processing_schema = 'http://store.synchrotron.org.au/mx/auto_link'
+    schema, created = Schema.objects.get_or_create(
+        name="AU Synchrotron MX auto processing link",
+        namespace=auto_processing_schema,
+        type=Schema.DATASET,
+        hidden=False)
+    ps, created = DatasetParameterSet.objects.get_or_create(
+        schema=schema, dataset=raw_dataset)
+    pn, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name="auto processing results",
+        full_name="Link to dataset containing auto processing results",
+        data_type=ParameterName.LINK
+    )
+    par, created = DatasetParameter.objects.get_or_create(
+        name=pn,
+        parameterset=ps,
+        link_id=auto_dataset.id,
+        link_ct=ContentType.objects.get_for_model(Dataset)
+    )
 
 
 class ASSquashParser(object):
@@ -449,9 +431,54 @@ class ASSquashParser(object):
             for dirname in dirnames])
 
     def parse_auto_processing(self, userdir):
+        '''
+        parse the auto folder under usernames.
+        create indexing and xtal processing datasets and link them up to their
+        raw data source datasets
+        '''
         top = os.path.join('home', userdir, 'auto')
+        dirnames, filenames = self.listdir(top)
+        result = True
+        if 'indexing_results.txt' in filenames:
+            result = result and self.parse_indexing_results(userdir)
+            filenames.remove('indexing_results.txt')
+            filenames.remove('indexing_results.html')
+            dirnames.remove('index')
 
-
+    def parse_indexing_results(self, userdir):
+        '''
+        adds a dataset for each indexing run and links it to the frame that
+        was indexed
+        '''
+        top = os.path.join('home', userdir, 'auto')
+        top_index = os.path.join(top, 'index')
+        dirnames, filenames = self.listdir(top_index)
+        with open(self.sq_inst.open(
+                os.path.join(top, 'indexing_results.txt'))) as infile:
+            indexing_results = infile.readlines()[3:]
+        result = True
+        for line in indexing_results:
+            items = line.split(',')
+            raw_dir, raw_file = items[9:11]
+            failed = items[15] == 'indexing failed'
+            raw_path = os.path.join(*(raw_dir.split('/')[3:] + [raw_file]))
+            raw_datafile = DataFile.objects.get(
+                file_objects__uri__endswith=raw_path,
+                dataset__experiments=self.experiment)
+            '([A-Za-z0-9_]+)_([0-9]+)_([0-9]+)(failed)?$'
+            regex = re.compile(
+                os.path.splitext(raw_file)[0] + '_([0-9]+)$')
+            match = [m for m in dirnames if regex.match(m)][0]
+            ds_dir = os.path.join(top_index, match),
+            dataset = self.get_or_create_dataset(
+                'Indexing for %(dataset)s, user %(userdir)s%(failed)s' % {
+                    'dataset': raw_datafile.filename,
+                    'userdir': userdir,
+                    'failed': ' - failed' if failed else ''
+                }, ds_dir)
+            result = result and self.add_subdir(ds_dir, dataset=dataset)
+            auto_indexing_link(raw_datafile, dataset)
+        return result
 
     def add_file(self, top, filename, dataset=None):
         if self.find_existing_dfo(top, filename):
@@ -549,6 +576,9 @@ class ASSquashParser(object):
         return False
 
     def get_file_details(self, top, filename):
+        '''
+
+        '''
         fullpath = os.path.join(top, filename)
         try:
             md5, sha512, size, mimetype_buffer = generate_file_checksums(
