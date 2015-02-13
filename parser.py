@@ -233,6 +233,9 @@ def parse_auto_processing(basedir, filename, s_box,
     return ds
 
 
+###############################################################################
+
+
 def remove_dotslash(path):
     if path[0:2] == './':
         return path[2:]
@@ -441,9 +444,21 @@ class ASSquashParser(object):
         result = True
         if 'indexing_results.txt' in filenames:
             result = result and self.parse_indexing_results(userdir)
+            result = self.add_files(top, [
+                'indexing_results.txt',
+                'indexing_results.html'
+            ], self.get_or_create_dataset('indexing summary for %s' %
+                                          userdir, top))
             filenames.remove('indexing_results.txt')
             filenames.remove('indexing_results.html')
             dirnames.remove('index')
+        if 'dataset' in dirnames:
+            result = result and self.parse_auto_dataset(userdir)
+            dirnames.remove('dataset')
+
+        if len(filenames) > 0:
+            result = self.add_files(top, filenames, self.get_or_create_dataset(
+                'other auto-files for %s' % userdir, top))
 
     def parse_indexing_results(self, userdir):
         '''
@@ -465,10 +480,13 @@ class ASSquashParser(object):
             raw_datafile = DataFile.objects.get(
                 file_objects__uri__endswith=raw_path,
                 dataset__experiments=self.experiment)
-            '([A-Za-z0-9_]+)_([0-9]+)_([0-9]+)(failed)?$'
+            # '([A-Za-z0-9_]+)_([0-9]+)_([0-9]+)(failed)?$'
             regex = re.compile(
                 os.path.splitext(raw_file)[0] + '_([0-9]+)$')
             match = [m for m in dirnames if regex.match(m)][0]
+            dirnames.remove(match)
+            if failed:
+                filenames.remove('%sfailed' % match)
             ds_dir = os.path.join(top_index, match),
             dataset = self.get_or_create_dataset(
                 'Indexing for %(dataset)s, user %(userdir)s%(failed)s' % {
@@ -478,7 +496,22 @@ class ASSquashParser(object):
                 }, ds_dir)
             result = result and self.add_subdir(ds_dir, dataset=dataset)
             auto_indexing_link(raw_datafile, dataset)
+        if len(dirnames) > 0 or len(filenames) > 0:
+            other_ds = self.get_or_create_dataset(
+                'other index-files for %s' % userdir, top)
+        if len(filenames) > 0:
+            result = result and self.add_files(top, filenames, other_ds)
+        if len(dirnames) > 0:
+            result = result and all([self.add_subdir(top, dirname, other_ds)
+                                     for dirname in dirnames])
         return result
+
+    def parse_auto_dataset(self, userdir):
+        top = os.path.join('home', userdir, 'auto', 'dataset')
+        dirnames, filenames = self.listdir(top)
+        regex = re.compile(
+            '(xds_process)?_?([a-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)')
+
 
     def add_file(self, top, filename, dataset=None):
         if self.find_existing_dfo(top, filename):
@@ -487,6 +520,8 @@ class ASSquashParser(object):
             return self.create_dfo(top, filename, dataset)
 
     def add_files(self, top, filenames, dataset=None):
+        if len(filenames) == 0:
+            return True
         return all([self.add_file(top, filename, dataset)
                     for filename in filenames])
 
@@ -500,10 +535,12 @@ class ASSquashParser(object):
             for path in ignore:
                 if path in dirnames:
                     dirnames.remove(path)
-        result = all([self.add_file(subdir, filename, dataset)
-                      for filename in filenames])
-        return result and all([self.add_subdir(dirname, dataset)
-                               for dirname in dirnames])
+        result = True
+        result = result and self.add_files(subdir, filenames, dataset)
+        if len(dirnames) > 0:
+            result = result and all([self.add_subdir(dirname, dataset)
+                                     for dirname in dirnames])
+        return result
 
     def create_dfo(self, top, filename, dataset=None):
         '''
