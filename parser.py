@@ -98,154 +98,10 @@ def get_squashfs_metadata(squash_sbox):
     return info
 
 
-def tag_with_user_info(dataset, metadata, username):
-    if 'usernames' not in metadata:
-        return
-    if username not in metadata['usernames']:
-        return
-    ns = 'http://synchrotron.org.au/userinfo'
-    schema, created = Schema.objects.get_or_create(
-        name="Synchrotron User Information",
-        namespace=ns,
-        type=Schema.NONE,
-        hidden=True)
-    ps, created = DatasetParameterSet.objects.get_or_create(
-        schema=schema, dataset=dataset)
-    pn_name, created = ParameterName.objects.get_or_create(
-        schema=schema,
-        name='name',
-        full_name='Full Name',
-        data_type=ParameterName.STRING
-    )
-    pn_email, created = ParameterName.objects.get_or_create(
-        schema=schema,
-        name='email',
-        full_name='email address',
-        data_type=ParameterName.STRING
-    )
-    pn_scientistid, created = ParameterName.objects.get_or_create(
-        schema=schema,
-        name='scientistid',
-        full_name='ScientistID',
-        data_type=ParameterName.STRING
-    )
-    data = metadata['usernames'][username]
-    p_name, created = DatasetParameter.objects.get_or_create(
-        name=pn_name, parameterset=ps)
-    if p_name.string_value is None or p_name.string_value == '':
-        p_name.string_value = data['Name']
-        p_name.save()
-    p_email, created = DatasetParameter.objects.get_or_create(
-        name=pn_email, parameterset=ps)
-    if p_email.string_value is None or p_name.string_value == '':
-        p_email.string_value = data['Email']
-        p_email.save()
-    p_scientistid, created = DatasetParameter.objects.get_or_create(
-        name=pn_scientistid, parameterset=ps)
-    if p_scientistid.string_value is None or \
-       p_scientistid.string_value == '':
-        p_scientistid.string_value = data['ScientistID']
-        p_scientistid.save()
-
-
-def store_auto_id(dataset, auto_id):
-    ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
-    schema, created = Schema.objects.get_or_create(
-        name="Synchrotron Auto Processing Results",
-        namespace=ns,
-        type=Schema.NONE,
-        hidden=True)
-    ps, created = DatasetParameterSet.objects.get_or_create(
-        schema=schema, dataset=dataset)
-    pn_mongoid, created = ParameterName.objects.get_or_create(
-        schema=schema,
-        name='mongo_id',
-        full_name='Mongo DB ID',
-        data_type=ParameterName.STRING
-    )
-    p_mongoid, created = DatasetParameter.objects.get_or_create(
-        name=pn_mongoid, parameterset=ps)
-    if p_mongoid.string_value is None or p_mongoid.string_value == '':
-        p_mongoid.string_value = auto_id
-        p_mongoid.save()
-
-
-def parse_auto_processing(basedir, filename, s_box,
-                          path_elements, experiment):
-    filepath = os.path.join(basedir, filename)
-    inst = s_box.get_initialised_storage_instance()
-    dataset_name = None
-    raw_dataset = None
-    if len(path_elements) > 4 and path_elements[3] == 'dataset':
-        auto_ds_regex = '(xds_process)?_?([a-z0-9_-]+)_' \
-                        '([0-9]+)_([0-9a-fA-F]+)'
-        match = re.findall(auto_ds_regex, filepath)
-        if match:
-            match = match[0]
-            # example:
-            # ('xds_process', 'p186_p16ds1_11', '300',
-            #  '53e26bf7f6ddfc73ef2c09a8')
-            xds = match[0] == 'xds_process'
-            # store mongo id for xds ones
-            dataset_name = match[1] + ' auto processing'
-            directory = os.path.join(
-                *path_elements[:min(5, len(path_elements))])
-            # symlink matching
-            # number_of_images = match[2]
-            auto_id = match[3]
-            if len(path_elements) > 4:
-                # actual results, not summary files
-                link_filename = inst.path(os.path.join(
-                    path_elements[0],
-                    path_elements[1],
-                    path_elements[2],
-                    path_elements[3],
-                    path_elements[4],
-                    'img'))
-                dataset_path = os.readlink(link_filename)
-                dataset_path = '/'.join(
-                    dataset_path.split('/')[2:])
-                img_dfos = DataFileObject.objects.filter(
-                    datafile__dataset__experiments=experiment,
-                    uri__startswith=dataset_path)
-                if len(img_dfos) > 0:
-                    raw_dataset = img_dfos[0].datafile.dataset
-                    if xds:
-                        store_auto_id(raw_dataset, auto_id)
-        else:
-            naming_dir_i = min(5, len(path_elements))
-            dataset_name = 'auto processing - %s' % path_elements[naming_dir_i]
-            directory = os.path.join(
-                *os.path.join(path_elements[:naming_dir_i]))
-    elif len(path_elements) > 4 and path_elements[3] == 'rickshaw':
-        dataset_name = 'auto rickshaw'
-        directory = os.path.join(*path_elements[:4])
-    else:
-        naming_dir_i = min(5, len(path_elements))
-        dataset_name = 'auto process - %s' % path_elements[naming_dir_i]
-        directory = os.path.join(*path_elements[:naming_dir_i])
-    ds = get_or_create_dataset(
-        description=dataset_name,
-        directory=directory,
-        experiment=experiment)
-    if raw_dataset is not None:
-        auto_processing_link(raw_dataset, ds)
-    return ds
-
-
-###############################################################################
-
-
 def remove_dotslash(path):
     if path[0:2] == './':
         return path[2:]
     return path
-
-
-def update_dataset(dataset, top):
-    if not dataset.directory.startswith(top):
-        dataset.directory = top
-        dataset.save()
 
 
 def auto_indexing_link(raw_datafile, indexing_dataset):
@@ -292,6 +148,28 @@ def auto_processing_link(raw_dataset, auto_dataset):
         link_id=auto_dataset.id,
         link_ct=ContentType.objects.get_for_model(Dataset)
     )
+
+
+def store_auto_id(dataset, auto_id):
+    ns = 'http://synchrotron.org.au/mx/autoprocessing/xds'
+    schema, created = Schema.objects.get_or_create(
+        name="Synchrotron Auto Processing Results",
+        namespace=ns,
+        type=Schema.NONE,
+        hidden=True)
+    ps, created = DatasetParameterSet.objects.get_or_create(
+        schema=schema, dataset=dataset)
+    pn_mongoid, created = ParameterName.objects.get_or_create(
+        schema=schema,
+        name='mongo_id',
+        full_name='Mongo DB ID',
+        data_type=ParameterName.STRING
+    )
+    p_mongoid, created = DatasetParameter.objects.get_or_create(
+        name=pn_mongoid, parameterset=ps)
+    if p_mongoid.string_value is None or p_mongoid.string_value == '':
+        p_mongoid.string_value = auto_id
+        p_mongoid.save()
 
 
 class ASSquashParser(object):
@@ -511,7 +389,44 @@ class ASSquashParser(object):
         dirnames, filenames = self.listdir(top)
         regex = re.compile(
             '(xds_process)?_?([a-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)')
+        # groups: xds y/n,   dataset name, image number, auto_id if xds
+        other_dirs = []
+        result = True
+        for dirname in dirnames:
+            match = regex.match(dirname)
+            ds_dir = os.path.join(top, dirname)
+            if match:
+                ds_dir = os.path.join(top, dirname)
+                dataset = self.get_or_create_dataset(
+                    'Auto processing %s for %s' % (dirname, userdir),
+                    ds_dir)
+                result = result and self.add_subdir(ds_dir, dataset)
+                logfile = '%s.log' % dirname
+                if logfile in filenames:
+                    result = result and self.add_file(top, logfile, dataset)
+                    filenames.remove(logfile)
+                raw_dataset = ' '
 
+                dataset_path = os.readlink(
+                    self.sq_inst.path(os.path.join(ds_dir, 'img')))
+                dataset_path = '/'.join(dataset_path.split('/')[2:])
+                img_dfos = DataFileObject.objects.filter(
+                    datafile__dataset__experiments=self.experiment,
+                    uri__contains=dataset_path)
+                if len(img_dfos) > 0:
+                    raw_dataset = img_dfos[0].datafile.dataset
+                    if match.groups()[0] is not None:
+                        store_auto_id(raw_dataset, match.groups()[3])
+                    auto_processing_link(raw_dataset, dataset)
+            else:
+                other_dirs.append(dirname)
+        if len(other_dirs) > 0:
+            other_ds = self.get_or_create_dataset(
+                'Auto processing other files for %s' % userdir, top)
+            for dirname in other_dirs:
+                result = result and self.add_subdir(dirname, other_ds)
+        result = result and self.add_files(top, filenames, other_ds)
+        return result
 
     def add_file(self, top, filename, dataset=None):
         if self.find_existing_dfo(top, filename):
@@ -551,7 +466,7 @@ class ASSquashParser(object):
             if df.dataset != dataset:
                 df.dataset = dataset
                 df.save()
-            update_dataset(df.dataset, top)
+            self.update_dataset(df.dataset, top)
         else:
             if dataset is None:
                 dataset = self.get_or_create_dataset('lost and found')
@@ -608,14 +523,11 @@ class ASSquashParser(object):
         except DataFileObject.DoesNotExist:
             dfo = False
         if dfo:
-            update_dataset(dfo.datafile.dataset, top)
+            self.update_dataset(dfo.datafile.dataset, top)
             return True
         return False
 
     def get_file_details(self, top, filename):
-        '''
-
-        '''
         fullpath = os.path.join(top, filename)
         try:
             md5, sha512, size, mimetype_buffer = generate_file_checksums(
@@ -649,6 +561,7 @@ class ASSquashParser(object):
         ds = Dataset(description=name)
         if top is not None:
             ds.directory = top
+            self.tag_user(ds, top)
         ds.save()
         ds.experiments.add(self.experiment)
         return ds
@@ -662,6 +575,65 @@ class ASSquashParser(object):
         dirnames = [d for d in dirnames if not d.startswith('.')]
         filenames = [f for f in filenames if not f.startswith('.')]
         return dirnames, filenames
+
+    def tag_user(self, dataset, path):
+        elems = path.split(os.sep)
+        username = None
+        for elem in elems:
+            if elem in self.metadata.get('usernames', []):
+                username = elem
+                break
+        if username is None:
+            return
+        ns = 'http://synchrotron.org.au/userinfo'
+        schema, created = Schema.objects.get_or_create(
+            name="Synchrotron User Information",
+            namespace=ns,
+            type=Schema.NONE,
+            hidden=True)
+        ps, created = DatasetParameterSet.objects.get_or_create(
+            schema=schema, dataset=dataset)
+        pn_name, created = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='name',
+            full_name='Full Name',
+            data_type=ParameterName.STRING
+        )
+        pn_email, created = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='email',
+            full_name='email address',
+            data_type=ParameterName.STRING
+        )
+        pn_scientistid, created = ParameterName.objects.get_or_create(
+            schema=schema,
+            name='scientistid',
+            full_name='ScientistID',
+            data_type=ParameterName.STRING
+        )
+        data = self.metadata['usernames'][username]
+        p_name, created = DatasetParameter.objects.get_or_create(
+            name=pn_name, parameterset=ps)
+        if p_name.string_value is None or p_name.string_value == '':
+            p_name.string_value = data['Name']
+            p_name.save()
+        p_email, created = DatasetParameter.objects.get_or_create(
+            name=pn_email, parameterset=ps)
+        if p_email.string_value is None or p_email.string_value == '':
+            p_email.string_value = data['Email']
+            p_email.save()
+        p_scientistid, created = DatasetParameter.objects.get_or_create(
+            name=pn_scientistid, parameterset=ps)
+        if p_scientistid.string_value is None or \
+           p_scientistid.string_value == '':
+            p_scientistid.string_value = data['ScientistID']
+            p_scientistid.save()
+
+        def update_dataset(self, dataset, top):
+            if not dataset.directory.startswith(top):
+                dataset.directory = top
+                dataset.save()
+            self.tag_user(dataset, top)
 
 
 def parse_squashfs_file(squashfile, ns):
