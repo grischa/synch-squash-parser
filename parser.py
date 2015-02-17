@@ -5,6 +5,7 @@ import re
 from magic import Magic
 
 from django.contrib.contenttypes.models import ContentType
+from django.db.models import Q
 
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
@@ -287,10 +288,10 @@ class ASSquashParser(object):
         home_dataset = self.get_or_create_dataset('home folder', top)
         result = self.add_files(top, filenames, home_dataset)
         for dirname in set(dirnames) & set(self.typical_home.keys()):
-            if self.typical_home['dirname']['ignore']:
+            if self.typical_home[dirname].get('ignore', False):
                 continue
             dataset = self.get_or_create_dataset(
-                self.typical_home['description'],
+                self.typical_home[dirname]['description'],
                 os.path.join(top, dirname))
             result = result and self.add_subdir(os.path.join(top, dirname),
                                                 dataset)
@@ -346,8 +347,8 @@ class ASSquashParser(object):
         top = os.path.join('home', userdir, 'auto')
         top_index = os.path.join(top, 'index')
         dirnames, filenames = self.listdir(top_index)
-        with open(self.sq_inst.open(
-                os.path.join(top, 'indexing_results.txt'))) as infile:
+        with self.sq_inst.open(
+                os.path.join(top, 'indexing_results.txt')) as infile:
             indexing_results = infile.readlines()[3:]
         result = True
         for line in indexing_results:
@@ -365,7 +366,7 @@ class ASSquashParser(object):
             dirnames.remove(match)
             if failed:
                 filenames.remove('%sfailed' % match)
-            ds_dir = os.path.join(top_index, match),
+            ds_dir = os.path.join(top_index, match)
             dataset = self.get_or_create_dataset(
                 'Indexing for %(dataset)s, user %(userdir)s%(failed)s' % {
                     'dataset': raw_datafile.filename,
@@ -462,6 +463,8 @@ class ASSquashParser(object):
         create dfo and datafile if necessary
         '''
         df, df_data = self.find_datafile(top, filename)
+        if df is None and df_data is None:
+            return True  # is a link
         if df:
             if df.dataset != dataset:
                 df.dataset = dataset
@@ -489,13 +492,15 @@ class ASSquashParser(object):
         # df_data usually is {md5, sha512, size, mimetype_buffer}
         df_data = self.get_file_details(
             top, filename)
+        if df_data == {}:
+            return None, None
         try:
             existing_dfs = DataFile.objects.filter(
                 filename=filename,
-                md5sum=df_data['md5'],
+                md5sum=df_data['md5sum'],
                 size=df_data['size'],
                 dataset__experiments=self.experiment)
-            nodir = existing_dfs.filter(directory='')
+            nodir = existing_dfs.filter(Q(directory=None) | Q(directory=''))
             samedir = existing_dfs.filter(directory=top)
             if nodir.count() == 1:
                 existing_df = nodir[0]
@@ -561,8 +566,10 @@ class ASSquashParser(object):
         ds = Dataset(description=name)
         if top is not None:
             ds.directory = top
+            ds.save()
             self.tag_user(ds, top)
-        ds.save()
+        else:
+            ds.save()
         ds.experiments.add(self.experiment)
         return ds
 
@@ -629,11 +636,11 @@ class ASSquashParser(object):
             p_scientistid.string_value = data['ScientistID']
             p_scientistid.save()
 
-        def update_dataset(self, dataset, top):
-            if not dataset.directory.startswith(top):
-                dataset.directory = top
-                dataset.save()
-            self.tag_user(dataset, top)
+    def update_dataset(self, dataset, top):
+        if dataset.directory is None or not dataset.directory.startswith(top):
+            dataset.directory = top
+            dataset.save()
+        self.tag_user(dataset, top)
 
 
 def parse_squashfs_file(squashfile, ns):
