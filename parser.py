@@ -356,13 +356,16 @@ class ASSquashParser(object):
             raw_dir, raw_file = items[9:11]
             failed = items[15] == 'indexing failed'
             raw_path = os.path.join(*(raw_dir.split('/')[3:] + [raw_file]))
-            raw_datafile = DataFile.objects.get(
+            raw_datafile = DataFile.objects.filter(
                 file_objects__uri__endswith=raw_path,
-                dataset__experiments=self.experiment)
+                dataset__experiments=self.experiment).distinct().get()
             # '([A-Za-z0-9_]+)_([0-9]+)_([0-9]+)(failed)?$'
             regex = re.compile(
                 os.path.splitext(raw_file)[0] + '_([0-9]+)$')
-            match = [m for m in dirnames if regex.match(m)][0]
+            match_list = [m for m in dirnames if regex.match(m)]
+            if len(match_list) == 0:
+                continue
+            match = match_list[0]
             dirnames.remove(match)
             if failed:
                 filenames.remove('%sfailed' % match)
@@ -381,8 +384,8 @@ class ASSquashParser(object):
         if len(filenames) > 0:
             result = result and self.add_files(top, filenames, other_ds)
         if len(dirnames) > 0:
-            result = result and all([self.add_subdir(top, dirname, other_ds)
-                                     for dirname in dirnames])
+            result = result and all([self.add_subdir(
+                os.path.join(top, dirname), other_ds) for dirname in dirnames])
         return result
 
     def parse_auto_dataset(self, userdir):
@@ -421,12 +424,14 @@ class ASSquashParser(object):
                     auto_processing_link(raw_dataset, dataset)
             else:
                 other_dirs.append(dirname)
-        if len(other_dirs) > 0:
+        if len(other_dirs) > 0 or len(filenames) > 0:
             other_ds = self.get_or_create_dataset(
                 'Auto processing other files for %s' % userdir, top)
+        if len(other_dirs) > 0:
             for dirname in other_dirs:
                 result = result and self.add_subdir(dirname, other_ds)
-        result = result and self.add_files(top, filenames, other_ds)
+        if len(filenames) > 0:
+            result = result and self.add_files(top, filenames, other_ds)
         return result
 
     def add_file(self, top, filename, dataset=None):
@@ -466,7 +471,7 @@ class ASSquashParser(object):
         if df is None and df_data is None:
             return True  # is a link
         if df:
-            if df.dataset != dataset:
+            if dataset is not None and df.dataset != dataset:
                 df.dataset = dataset
                 df.save()
             self.update_dataset(df.dataset, top)
