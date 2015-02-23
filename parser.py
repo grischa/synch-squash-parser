@@ -256,8 +256,10 @@ class ASSquashParser(object):
     def parse(self):
         top = '.'
         dirnames, filenames = self.listdir('.')
-        def_dataset = self.get_or_create_dataset('other files')
-        result = self.add_files(top, filenames, def_dataset)
+        result = True
+        if len(filenames) > 0:
+            def_dataset = self.get_or_create_dataset('other files')
+            result = result and self.add_files(top, filenames, def_dataset)
         for dirname in dirnames:
             if dirname == 'frames':
                 result = result and self.parse_frames()
@@ -276,25 +278,34 @@ class ASSquashParser(object):
         if 'calibration' in dirnames:
             cal_dataset = self.get_or_create_dataset(
                 'calibration', os.path.join(top, 'calibration'))
-            result = result and self.add_subdir(top, cal_dataset)
+            result = result and self.add_subdir(
+                os.path.join(top, 'calibration'), cal_dataset,
+                ignore=self.frames_ignore_paths)
             dirnames.remove('calibration')
-        return result and all([self.add_subdir(os.path.join(top, dirname),
-                                               ignore=self.frames_ignore_paths)
-                               for dirname in dirnames])
+        if len(dirnames) > 0:
+            result = result and all([
+                self.add_subdir(os.path.join(top, dirname),
+                                ignore=self.frames_ignore_paths)
+                for dirname in dirnames])
+        return result
 
     def parse_home(self):
         top = 'home'
         dirnames, filenames = self.listdir(top)
-        home_dataset = self.get_or_create_dataset('home folder', top)
-        result = self.add_files(top, filenames, home_dataset)
+        result = True
+        if len(filenames) > 0:
+            home_dataset = self.get_or_create_dataset('home folder', top)
+            result = result and self.add_files(top, filenames, home_dataset)
         for dirname in set(dirnames) & set(self.typical_home.keys()):
             if self.typical_home[dirname].get('ignore', False):
                 continue
+            subdir = os.path.join(top, dirname)
+            subdir_dirs, subdir_files = self.listdir(subdir)
+            if len(subdir_dirs) == 0 and len(subdir_files) == 0:
+                continue
             dataset = self.get_or_create_dataset(
-                self.typical_home[dirname]['description'],
-                os.path.join(top, dirname))
-            result = result and self.add_subdir(os.path.join(top, dirname),
-                                                dataset)
+                self.typical_home[dirname]['description'], subdir)
+            result = result and self.add_subdir(subdir, dataset)
         for dirname in set(dirnames) - set(self.typical_home.keys()):
             result = result and self.parse_user_dir(dirname)
         return result
@@ -302,15 +313,21 @@ class ASSquashParser(object):
     def parse_user_dir(self, userdir):
         top = os.path.join('home', userdir)
         dirnames, filenames = self.listdir(top)
-        user_dataset = self.get_or_create_dataset(
-            'home/%s' % userdir, top)
-        result = self.add_files(top, filenames, user_dataset)
+        result = True
         if 'auto' in dirnames:
             result = result and self.parse_auto_processing(userdir)
             dirnames.remove('auto')
-        return result and all([
-            self.add_subdir(os.path.join(top, dirname), user_dataset)
-            for dirname in dirnames])
+        if len(dirnames) == 0 and len(filenames) == 0:
+            return result
+        user_dataset = self.get_or_create_dataset(
+            'home/%s' % userdir, top)
+        if len(filenames) > 0:
+            result = result and self.add_files(top, filenames, user_dataset)
+        if len(dirnames) > 0:
+            result = result and all([
+                self.add_subdir(os.path.join(top, dirname), user_dataset)
+                for dirname in dirnames])
+        return result
 
     def parse_auto_processing(self, userdir):
         '''
@@ -323,7 +340,7 @@ class ASSquashParser(object):
         result = True
         if 'indexing_results.txt' in filenames:
             result = result and self.parse_indexing_results(userdir)
-            result = self.add_files(top, [
+            result = result and self.add_files(top, [
                 'indexing_results.txt',
                 'indexing_results.html'
             ], self.get_or_create_dataset('indexing summary for %s' %
@@ -334,10 +351,11 @@ class ASSquashParser(object):
         if 'dataset' in dirnames:
             result = result and self.parse_auto_dataset(userdir)
             dirnames.remove('dataset')
-
         if len(filenames) > 0:
-            result = self.add_files(top, filenames, self.get_or_create_dataset(
-                'other auto-files for %s' % userdir, top))
+            result = result and self.add_files(
+                top, filenames, self.get_or_create_dataset(
+                    'other auto-files for %s' % userdir, top))
+        return result
 
     def parse_indexing_results(self, userdir):
         '''
@@ -459,8 +477,9 @@ class ASSquashParser(object):
         result = True
         result = result and self.add_files(subdir, filenames, dataset)
         if len(dirnames) > 0:
-            result = result and all([self.add_subdir(dirname, dataset)
-                                     for dirname in dirnames])
+            result = result and all([self.add_subdir(
+                os.path.join(subdir, dirname), dataset, ignore)
+                for dirname in dirnames])
         return result
 
     def create_dfo(self, top, filename, dataset=None):
@@ -471,9 +490,13 @@ class ASSquashParser(object):
         if df is None and df_data is None:
             return True  # is a link
         if df:
-            if dataset is not None and df.dataset != dataset:
+            if dataset is not None and df.dataset.id != dataset.id:
+                # olddataset_id = df.dataset.id
                 df.dataset = dataset
                 df.save()
+                # oldds = Dataset.objects.get(id=olddataset_id)
+                # if oldds.datafile_set.count() == 0:
+                #     oldds.delete()
             self.update_dataset(df.dataset, top)
         else:
             if dataset is None:
@@ -525,17 +548,17 @@ class ASSquashParser(object):
         return existing_df, df_data
 
     def find_existing_dfo(self, top, filename):
+        '''
+        check whether this parser had previously registered this file
+        '''
         try:
-            dfo = DataFileObject.objects.get(
+            DataFileObject.objects.get(
                 storage_box=self.s_box,
                 uri=os.path.join(top, filename),
                 datafile__dataset__experiments=self.experiment)
-        except DataFileObject.DoesNotExist:
-            dfo = False
-        if dfo:
-            self.update_dataset(dfo.datafile.dataset, top)
             return True
-        return False
+        except DataFileObject.DoesNotExist:
+            return False
 
     def get_file_details(self, top, filename):
         fullpath = os.path.join(top, filename)
@@ -642,7 +665,16 @@ class ASSquashParser(object):
             p_scientistid.save()
 
     def update_dataset(self, dataset, top):
-        if dataset.directory is None or not dataset.directory.startswith(top):
+        '''
+        update dataset with directory if none is set or its first two elems
+        are different
+        '''
+        split_top = top.split(os.sep)
+        comp_dir = None
+        if len(split_top) > 1:
+            comp_dir = os.path.join(*split_top[:3])
+        if dataset.directory is None or (comp_dir is not None and
+           not dataset.directory.startswith(comp_dir)):
             dataset.directory = top
             dataset.save()
         self.tag_user(dataset, top)
