@@ -1,5 +1,6 @@
 import ast
 import os
+import pickletools
 import re
 
 from magic import Magic
@@ -171,6 +172,14 @@ def store_auto_id(dataset, auto_id):
     if p_mongoid.string_value is None or p_mongoid.string_value == '':
         p_mongoid.string_value = auto_id
         p_mongoid.save()
+
+
+def extract_pickled_filename(pickle_path):
+    with open(pickle_path, 'r') as f:
+        items = pickletools.genops(f)
+        paths = [key for op, key, val in items
+                 if type(key) == str and key.startswith('/data')]
+    return max(paths, key=lambda x: len(x))
 
 
 class ASSquashParser(object):
@@ -362,48 +371,44 @@ class ASSquashParser(object):
         adds a dataset for each indexing run and links it to the frame that
         was indexed
         '''
-        top = os.path.join('home', userdir, 'auto')
-        top_index = os.path.join(top, 'index')
-        dirnames, filenames = self.listdir(top_index)
-        with self.sq_inst.open(
-                os.path.join(top, 'indexing_results.txt')) as infile:
-            indexing_results = infile.readlines()[3:]
+        top = os.path.join('home', userdir, 'auto', 'index')
+        dirnames, filenames = self.listdir(top)
         result = True
-        for line in indexing_results:
-            items = line.split(',')
-            raw_dir, raw_file = items[9:11]
-            failed = items[15] == 'indexing failed'
-            raw_path = os.path.join(*(raw_dir.split('/')[3:] + [raw_file]))
-            raw_datafile = DataFile.objects.filter(
-                file_objects__uri__endswith=raw_path,
-                dataset__experiments=self.experiment).distinct().get()
-            # '([A-Za-z0-9_]+)_([0-9]+)_([0-9]+)(failed)?$'
-            regex = re.compile(
-                os.path.splitext(raw_file)[0] + '_([0-9]+)$')
-            match_list = [m for m in dirnames if regex.match(m)]
-            if len(match_list) == 0:
+        other_dirs = []
+        for dirname in dirnames:
+            full_path = os.path.join(top, dirname)
+            try:
+                raw_image_path = extract_pickled_filename(self.sq_inst.path(
+                    os.path.join(full_path, 'DISTL_pickle')))
+            except:
+                # no indexing run
+                other_dirs.append(dirname)
                 continue
-            match = match_list[0]
-            dirnames.remove(match)
+            # remove common prefix '/data/EPN/'
+            raw_image_path = os.path.join(*(raw_image_path.split('/')[3:]))
+            failed = ('%sfailed' % dirname) in filenames
+            raw_datafile = DataFile.objects.filter(
+                file_objects__uri__endswith=raw_image_path,
+                dataset__experiments=self.experiment).distinct().get()
             if failed:
-                filenames.remove('%sfailed' % match)
-            ds_dir = os.path.join(top_index, match)
+                filenames.remove('%sfailed' % dirname)
             dataset = self.get_or_create_dataset(
                 'Indexing for %(dataset)s, user %(userdir)s%(failed)s' % {
                     'dataset': raw_datafile.filename,
                     'userdir': userdir,
                     'failed': ' - failed' if failed else ''
-                }, ds_dir)
-            result = result and self.add_subdir(ds_dir, dataset=dataset)
+                }, full_path)
+            result = result and self.add_subdir(full_path, dataset=dataset)
             auto_indexing_link(raw_datafile, dataset)
-        if len(dirnames) > 0 or len(filenames) > 0:
+        if len(other_dirs) > 0 or len(filenames) > 0:
             other_ds = self.get_or_create_dataset(
                 'other index-files for %s' % userdir, top)
         if len(filenames) > 0:
             result = result and self.add_files(top, filenames, other_ds)
-        if len(dirnames) > 0:
+        if len(other_dirs) > 0:
             result = result and all([self.add_subdir(
-                os.path.join(top, dirname), other_ds) for dirname in dirnames])
+                os.path.join(top, dirname), other_ds)
+                for dirname in other_dirs])
         return result
 
     def parse_auto_dataset(self, userdir):
