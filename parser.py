@@ -360,10 +360,16 @@ class ASSquashParser(object):
         if 'dataset' in dirnames:
             result = result and self.parse_auto_dataset(userdir)
             dirnames.remove('dataset')
+        if len(filenames) > 0 or len(dirnames) > 0:
+            other_ds = self.get_or_create_dataset(
+                'other auto-files for %s' % userdir, top)
         if len(filenames) > 0:
             result = result and self.add_files(
-                top, filenames, self.get_or_create_dataset(
-                    'other auto-files for %s' % userdir, top))
+                top, filenames, other_ds)
+        if len(dirnames) > 0:
+            result = result and all([
+                self.add_subdir(os.path.join(top, dirname), other_ds)
+                for dirname in dirnames])
         return result
 
     def parse_indexing_results(self, userdir):
@@ -393,8 +399,8 @@ class ASSquashParser(object):
             if failed:
                 filenames.remove('%sfailed' % dirname)
             dataset = self.get_or_create_dataset(
-                'Indexing for %(dataset)s, user %(userdir)s%(failed)s' % {
-                    'dataset': raw_datafile.filename,
+                'Indexing for %(datafile)s, user %(userdir)s%(failed)s' % {
+                    'datafile': raw_image_path,
                     'userdir': userdir,
                     'failed': ' - failed' if failed else ''
                 }, full_path)
@@ -415,7 +421,7 @@ class ASSquashParser(object):
         top = os.path.join('home', userdir, 'auto', 'dataset')
         dirnames, filenames = self.listdir(top)
         regex = re.compile(
-            '(xds_process)?_?([a-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)')
+            '(xds_process)?_?([A-Za-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)')
         # groups: xds y/n,   dataset name, image number, auto_id if xds
         other_dirs = []
         result = True
@@ -424,27 +430,25 @@ class ASSquashParser(object):
             ds_dir = os.path.join(top, dirname)
             if match:
                 ds_dir = os.path.join(top, dirname)
+                raw_dataset_path = os.readlink(
+                    self.sq_inst.path(os.path.join(ds_dir, 'img')))
+                raw_dataset_path = '/'.join(raw_dataset_path.split('/')[2:])
                 dataset = self.get_or_create_dataset(
-                    'Auto processing %s for %s' % (dirname, userdir),
+                    'Auto processing %s for %s' % (raw_dataset_path, userdir),
                     ds_dir)
+                img_dfos = DataFileObject.objects.filter(
+                    datafile__dataset__experiments=self.experiment,
+                    uri__contains=raw_dataset_path)
+                if img_dfos.count() > 0:
+                    raw_dataset = img_dfos[0].datafile.dataset
+                    if match.groups()[0] is not None:
+                        store_auto_id(raw_dataset, match.groups()[3])
+                    auto_processing_link(raw_dataset, dataset)
                 result = result and self.add_subdir(ds_dir, dataset)
                 logfile = '%s.log' % dirname
                 if logfile in filenames:
                     result = result and self.add_file(top, logfile, dataset)
                     filenames.remove(logfile)
-                raw_dataset = ' '
-
-                dataset_path = os.readlink(
-                    self.sq_inst.path(os.path.join(ds_dir, 'img')))
-                dataset_path = '/'.join(dataset_path.split('/')[2:])
-                img_dfos = DataFileObject.objects.filter(
-                    datafile__dataset__experiments=self.experiment,
-                    uri__contains=dataset_path)
-                if len(img_dfos) > 0:
-                    raw_dataset = img_dfos[0].datafile.dataset
-                    if match.groups()[0] is not None:
-                        store_auto_id(raw_dataset, match.groups()[3])
-                    auto_processing_link(raw_dataset, dataset)
             else:
                 other_dirs.append(dirname)
         if len(other_dirs) > 0 or len(filenames) > 0:
@@ -452,7 +456,8 @@ class ASSquashParser(object):
                 'Auto processing other files for %s' % userdir, top)
         if len(other_dirs) > 0:
             for dirname in other_dirs:
-                result = result and self.add_subdir(dirname, other_ds)
+                result = result and self.add_subdir(
+                    os.path.join(top, dirname), other_ds)
         if len(filenames) > 0:
             result = result and self.add_files(top, filenames, other_ds)
         return result
