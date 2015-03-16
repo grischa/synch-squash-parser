@@ -178,7 +178,7 @@ def extract_pickled_filename(pickle_path):
     with open(pickle_path, 'r') as f:
         items = pickletools.genops(f)
         paths = [key for op, key, val in items
-                 if type(key) == str and key.startswith('/data')]
+                 if isinstance(key, str) and key.startswith('/data')]
     return max(paths, key=lambda x: len(x))
 
 
