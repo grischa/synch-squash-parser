@@ -182,6 +182,23 @@ def extract_pickled_filename(pickle_path):
     return max(paths, key=lambda x: len(x))
 
 
+def prefix_dataset(dataset, prefix):
+    if not dataset.description.startswith(prefix):
+        dataset.description = '%s %s' % (prefix, dataset.description)
+        dataset.save()
+
+
+def split_off_run_id(path):
+    try:
+        parts = path.split('_')
+        if len(parts) > 1:
+            return parts[-1]
+        else:
+            return 'n/a'
+    except (AttributeError, IndexError):
+        return 'n/a'
+
+
 class ASSquashParser(object):
     '''
     if frames:
@@ -286,7 +303,7 @@ class ASSquashParser(object):
         result = self.add_files(top, filenames)
         if 'calibration' in dirnames:
             cal_dataset = self.get_or_create_dataset(
-                'calibration', os.path.join(top, 'calibration'))
+                'calibration', os.path.join(top, '00 calibration'))
             result = result and self.add_subdir(
                 os.path.join(top, 'calibration'), cal_dataset,
                 ignore=self.frames_ignore_paths)
@@ -352,7 +369,7 @@ class ASSquashParser(object):
             result = result and self.add_files(top, [
                 'indexing_results.txt',
                 'indexing_results.html'
-            ], self.get_or_create_dataset('indexing summary for %s' %
+            ], self.get_or_create_dataset('indexing summary, user %s' %
                                           userdir, top))
             filenames.remove('indexing_results.txt')
             filenames.remove('indexing_results.html')
@@ -362,7 +379,7 @@ class ASSquashParser(object):
             dirnames.remove('dataset')
         if len(filenames) > 0 or len(dirnames) > 0:
             other_ds = self.get_or_create_dataset(
-                'other auto-files for %s' % userdir, top)
+                'other auto-files, user %s' % userdir, top)
         if len(filenames) > 0:
             result = result and self.add_files(
                 top, filenames, other_ds)
@@ -399,8 +416,10 @@ class ASSquashParser(object):
             if failed:
                 filenames.remove('%sfailed' % dirname)
             dataset = self.get_or_create_dataset(
-                'Indexing for %(datafile)s, user %(userdir)s%(failed)s' % {
+                'Autoindexing for %(datafile)s, runid %(runid)s, '
+                'user %(userdir)s%(failed)s' % {
                     'datafile': raw_image_path,
+                    'runid': split_off_run_id(dirname),
                     'userdir': userdir,
                     'failed': ' - failed' if failed else ''
                 }, full_path)
@@ -434,7 +453,10 @@ class ASSquashParser(object):
                     self.sq_inst.path(os.path.join(ds_dir, 'img')))
                 raw_dataset_path = '/'.join(raw_dataset_path.split('/')[2:])
                 dataset = self.get_or_create_dataset(
-                    'Auto processing %s for %s' % (raw_dataset_path, userdir),
+                    'Autodataset %s, runid %s, user %s' % (
+                        raw_dataset_path,
+                        split_off_run_id(dirname),
+                        userdir),
                     ds_dir)
                 img_dfos = DataFileObject.objects.filter(
                     datafile__dataset__experiments=self.experiment,
@@ -507,6 +529,9 @@ class ASSquashParser(object):
                 # oldds = Dataset.objects.get(id=olddataset_id)
                 # if oldds.datafile_set.count() == 0:
                 #     oldds.delete()
+            elif dataset is None and top.startswith('frames'):
+                prefix = 'Raw data for'
+                prefix_dataset(df.dataset, prefix)
             self.update_dataset(df.dataset, top)
         else:
             if dataset is None:
