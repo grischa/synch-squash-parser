@@ -77,8 +77,11 @@ def get_squashfs_metadata(squash_sbox):
     '''
     info_path = 'frames/.info'
     inst = squash_sbox.get_initialised_storage_instance()
-    with inst.open(info_path) as info_file:
-        info = ast.literal_eval(info_file.read())
+    try:
+        with inst.open(info_path) as info_file:
+            info = ast.literal_eval(info_file.read())
+    except IOError:
+        return {}
 
     def transform_name(name):
         '''
@@ -94,7 +97,7 @@ def get_squashfs_metadata(squash_sbox):
             transform_name(info['PI']['Name']): info['PI']}
         for user in info['users']:
             info['usernames'][transform_name(user['Name'])] = user
-    except:
+    except AttributeError:
         pass
 
     return info
@@ -733,7 +736,7 @@ def register_squashfile(exp_id, epn, sq_dir, sq_filename, namespace):
     dfs = DataFile.objects.filter(filename=sq_filename,
                                   dataset__experiments__id=exp_id)
     if len(dfs) == 1:
-        return dfs[0].id
+        return dfs[0]
     e = Experiment.objects.get(id=exp_id)
     ds = Dataset(description="01 SquashFS Archive")
     ds.save()
