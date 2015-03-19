@@ -11,7 +11,7 @@ from django.db.models import Q
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
     ParameterName, DatafileParameterSet,
-    DatafileParameter, ExperimentParameter,
+    DatafileParameter, Experiment, ExperimentParameter,
     Schema, DatasetParameterSet, DatasetParameter,
     StorageBox, StorageBoxOption
 )
@@ -303,7 +303,7 @@ class ASSquashParser(object):
         result = self.add_files(top, filenames)
         if 'calibration' in dirnames:
             cal_dataset = self.get_or_create_dataset(
-                'calibration', os.path.join(top, '00 calibration'))
+                '00 calibration', os.path.join(top, 'calibration'))
             result = result and self.add_subdir(
                 os.path.join(top, 'calibration'), cal_dataset,
                 ignore=self.frames_ignore_paths)
@@ -475,7 +475,7 @@ class ASSquashParser(object):
                 other_dirs.append(dirname)
         if len(other_dirs) > 0 or len(filenames) > 0:
             other_ds = self.get_or_create_dataset(
-                'Auto processing other files for %s' % userdir, top)
+                'Auto processing other files, user %s' % userdir, top)
         if len(other_dirs) > 0:
             for dirname in other_dirs:
                 result = result and self.add_subdir(
@@ -722,3 +722,37 @@ def parse_squashfs_file(squashfile, ns):
 
     parser = ASSquashParser(squashfile, ns)
     return parser.parse()
+
+
+def register_squashfile(exp_id, epn, sq_dir, sq_filename, namespace):
+    '''
+    example:
+    register_squashfile(456, '1234A', '/srv/squashstore', '1234A.squashfs',
+        'http://synchrotron.org.au/mx/squashfsarchive/1')
+    '''
+    dfs = DataFile.objects.filter(filename=sq_filename,
+                                  dataset__experiments__id=exp_id)
+    if len(dfs) == 1:
+        return dfs[0].id
+    e = Experiment.objects.get(id=exp_id)
+    ds = Dataset(description="01 SquashFS Archive")
+    ds.save()
+    ds.experiments.add(e)
+    filepath = os.path.join(sq_dir, sq_filename)
+    try:
+        md5sum = open(filepath + '.md5sum', 'r').read().strip()[:32]
+    except:
+        print 'no md5sum file found'
+        return None
+    size = os.path.getsize(filepath)
+    df = DataFile(md5sum=md5sum, filename=sq_filename,
+                  size=str(size), dataset=ds)
+    df.save()
+    schema = Schema.objects.filter(namespace=namespace)[0]
+    ps = DatafileParameterSet(schema=schema, datafile=df)
+    ps.save()
+    ps.set_param('EPN', epn)
+    sbox = StorageBox.objects.get(name='squashstore')
+    dfo = DataFileObject(storage_box=sbox, datafile=df, uri=sq_filename)
+    dfo.save()
+    return df
