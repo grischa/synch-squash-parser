@@ -1,4 +1,4 @@
-import ast
+import json
 import os
 import pickletools
 import re
@@ -79,7 +79,7 @@ def get_squashfs_metadata(squash_sbox):
     inst = squash_sbox.get_initialised_storage_instance()
     try:
         with inst.open(info_path) as info_file:
-            info = ast.literal_eval(info_file.read())
+            info = json.load(info_file)
     except IOError:
         return {}
 
