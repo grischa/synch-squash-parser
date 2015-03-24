@@ -413,9 +413,12 @@ class ASSquashParser(object):
             # remove common prefix '/data/EPN/'
             raw_image_path = os.path.join(*(raw_image_path.split('/')[3:]))
             failed = ('%sfailed' % dirname) in filenames
-            raw_datafile = DataFile.objects.filter(
-                file_objects__uri__endswith=raw_image_path,
-                dataset__experiments=self.experiment).distinct().get()
+            try:
+                raw_datafile = DataFile.objects.filter(
+                    file_objects__uri__endswith=raw_image_path,
+                    dataset__experiments=self.experiment).distinct().get()
+            except DataFile.DoesNotExist:
+                raw_datafile = None
             if failed:
                 filenames.remove('%sfailed' % dirname)
             dataset = self.get_or_create_dataset(
@@ -427,7 +430,8 @@ class ASSquashParser(object):
                     'failed': ' - failed' if failed else ''
                 }, full_path)
             result = result and self.add_subdir(full_path, dataset=dataset)
-            auto_indexing_link(raw_datafile, dataset)
+            if raw_datafile is not None:
+                auto_indexing_link(raw_datafile, dataset)
         if len(other_dirs) > 0 or len(filenames) > 0:
             other_ds = self.get_or_create_dataset(
                 'other index-files for %s' % userdir, top)
