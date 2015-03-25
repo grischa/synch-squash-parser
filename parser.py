@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import pickletools
@@ -77,11 +78,19 @@ def get_squashfs_metadata(squash_sbox):
     '''
     info_path = 'frames/.info'
     inst = squash_sbox.get_initialised_storage_instance()
+    info = {}
     try:
         with inst.open(info_path) as info_file:
-            info = json.load(info_file)
+            info_string = info_file.read()
     except IOError:
         return {}
+    try:
+        info = json.loads(info_string)
+    except (ValueError, IOError):
+        try:
+            info = ast.literal_eval(info_string)
+        except:
+            return {}
 
     def transform_name(name):
         '''
