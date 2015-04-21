@@ -467,7 +467,12 @@ class ASSquashParser(object):
                 ds_dir = os.path.join(top, dirname)
                 raw_dataset_path = os.readlink(
                     self.sq_inst.path(os.path.join(ds_dir, 'img')))
-                raw_dataset_path = '/'.join(raw_dataset_path.split('/')[2:])
+                raw_path_parts = raw_dataset_path.split('/')
+                if raw_path_parts[2] == 'frames':
+                    raw_path_parts = ['frames'] + raw_path_parts[4:]
+                else:
+                    raw_path_parts = raw_path_parts[3:]
+                raw_dataset_path = '/'.join(raw_path_parts)
                 dataset = self.get_or_create_dataset(
                     'Autodataset %s, runid %s, user %s' % (
                         raw_dataset_path,
