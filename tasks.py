@@ -5,7 +5,7 @@ from celery.task import task
 from tardis.tardis_portal.models import Experiment
 
 from tardis.apps.synch_squash_parser.parser import parse_squashfs_file
-from tardis.apps.synch_squash_parser import register_squashfile
+from tardis.apps.synch_squash_parser.parser import register_squashfile
 
 
 def reset_status(dfid):
