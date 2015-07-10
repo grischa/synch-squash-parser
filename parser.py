@@ -4,8 +4,6 @@ import os
 import pickletools
 import re
 
-from magic import Magic
-
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
 
@@ -16,9 +14,10 @@ from tardis.tardis_portal.models import (
     Schema, DatasetParameterSet, DatasetParameter,
     StorageBox, StorageBoxOption
 )
-from tardis.tardis_portal.util import generate_file_checksums
+from tardis_portal.models.datafile import compute_checksums
 
 import logging
+
 log = logging.getLogger(__name__)
 
 
@@ -573,7 +572,7 @@ class ASSquashParser(object):
 
     def find_datafile(self, top, filename):
         fullpath = os.path.join(top, filename)
-        # df_data usually is {md5, sha512, size, mimetype_buffer}
+        # df_data usually is {md5, sha512, size}
         df_data = self.get_file_details(
             top, filename)
         if df_data == {}:
@@ -619,19 +618,18 @@ class ASSquashParser(object):
     def get_file_details(self, top, filename):
         fullpath = os.path.join(top, filename)
         try:
-            md5, sha512, size, mimetype_buffer = generate_file_checksums(
-                self.sq_inst.open(fullpath))
+            fo = self.sq_inst.open(fullpath)
+            size = fo.size
+            checksums = compute_checksums(fo)
         except IOError as e:
             log.debug('squash parse error')
             log.debug(e)
             if os.path.islink(self.sq_inst.path(fullpath)):
                 return {}
             raise
-        mimetype = Magic(mime=True).from_buffer(mimetype_buffer or '')
         return {'size': str(size),
-                'mimetype': mimetype,
-                'md5sum': md5,
-                'sha512sum': sha512}
+                'md5sum': checksums['md5sum'],
+                'sha512sum': checksums['sha512sum']}
 
     def get_or_create_dataset(self, name, top=None):
         '''
