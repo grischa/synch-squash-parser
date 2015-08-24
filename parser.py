@@ -95,7 +95,8 @@ def get_squashfs_metadata(squash_sbox):
         '''
         create short name from last name and first character of first name
         '''
-        f_name, l_name = name.split(' ')
+        names = name.split(' ')
+        f_name, l_name = names[0], names[-1]
         u_name = l_name + f_name[0]
         u_name = u_name.lower()
         return u_name
