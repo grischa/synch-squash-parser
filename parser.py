@@ -14,7 +14,7 @@ from tardis.tardis_portal.models import (
     Schema, DatasetParameterSet, DatasetParameter,
     StorageBox, StorageBoxOption
 )
-from tardis_portal.models.datafile import compute_checksums
+from tardis.tardis_portal.models.datafile import compute_checksums
 
 import logging
 
