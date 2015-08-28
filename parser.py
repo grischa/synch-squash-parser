@@ -586,11 +586,11 @@ class ASSquashParser(object):
                 dataset__experiments=self.experiment)
             nodir = existing_dfs.filter(Q(directory=None) | Q(directory=''))
             samedir = existing_dfs.filter(directory=top)
-            if nodir.count() == 1:
+            if nodir.count() >= 1:
                 existing_df = nodir[0]
                 existing_df.directory = top
                 existing_df.save()
-            elif samedir.count() == 1:
+            elif samedir.count() >= 1:
                 existing_df = samedir[0]
             else:
                 existing_df = None
