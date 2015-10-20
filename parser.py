@@ -6,6 +6,7 @@ import re
 
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
+from django.utils.timezone import make_aware
 
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
@@ -597,8 +598,9 @@ class ASSquashParser(object):
         except DataFile.DoesNotExist:
             existing_df = None
         df_data.update({
-            'created_time': self.sq_inst.created_time(fullpath),
-            'modification_time': self.sq_inst.modified_time(fullpath),
+            'created_time': make_aware(self.sq_inst.created_time(fullpath)),
+            'modification_time': make_aware(
+                self.sq_inst.modified_time(fullpath)),
             # 'modified_time' is more standard, but will stick with df model
         })
         return existing_df, df_data
