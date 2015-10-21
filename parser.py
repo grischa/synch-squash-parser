@@ -295,6 +295,8 @@ class ASSquashParser(object):
     def parse(self):
         top = '.'
         dirnames, filenames = self.listdir('.')
+        if len(dirnames) == 0 and len(filenames) == 0:
+            return False
         result = True
         if len(filenames) > 0:
             def_dataset = self.get_or_create_dataset('other files')
