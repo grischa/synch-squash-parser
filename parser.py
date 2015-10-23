@@ -460,36 +460,40 @@ class ASSquashParser(object):
         dirnames, filenames = self.listdir(top)
         regex = re.compile(
             '(xds_process)?_?([A-Za-z0-9_-]+)_([0-9]+)_([0-9a-fA-F]+)')
-        # groups: xds y/n,   dataset name, image number, auto_id if xds
+        # groups: xds y/n, dataset name, image number, auto_id if xds
         other_dirs = []
         result = True
         for dirname in dirnames:
             match = regex.match(dirname)
-            ds_dir = os.path.join(top, dirname)
             if match:
                 ds_dir = os.path.join(top, dirname)
-                raw_dataset_path = os.readlink(
-                    self.sq_inst.path(os.path.join(ds_dir, 'img')))
-                raw_path_parts = raw_dataset_path.split('/')
-                if raw_path_parts[2] == 'frames':
-                    raw_path_parts = ['frames'] + raw_path_parts[4:]
-                else:
-                    raw_path_parts = raw_path_parts[3:]
-                raw_dataset_path = '/'.join(raw_path_parts)
+                try:
+                    raw_dataset_path = os.readlink(
+                        self.sq_inst.path(os.path.join(ds_dir, 'img')))
+                except OSError:
+                    raw_dataset_path = None
+                if raw_dataset_path is not None:
+                    raw_path_parts = raw_dataset_path.split('/')
+                    if raw_path_parts[2] == 'frames':
+                        raw_path_parts = ['frames'] + raw_path_parts[4:]
+                    else:
+                        raw_path_parts = raw_path_parts[3:]
+                    raw_dataset_path = '/'.join(raw_path_parts)
                 dataset = self.get_or_create_dataset(
                     'Autodataset %s, runid %s, user %s' % (
-                        raw_dataset_path,
+                        raw_dataset_path or 'for unknown',
                         split_off_run_id(dirname),
                         userdir),
                     ds_dir)
-                img_dfos = DataFileObject.objects.filter(
-                    datafile__dataset__experiments=self.experiment,
-                    uri__contains=raw_dataset_path)
-                if img_dfos.count() > 0:
-                    raw_dataset = img_dfos[0].datafile.dataset
-                    if match.groups()[0] is not None:
-                        store_auto_id(raw_dataset, match.groups()[3])
-                    auto_processing_link(raw_dataset, dataset)
+                if raw_dataset_path is not None:
+                    img_dfos = DataFileObject.objects.filter(
+                        datafile__dataset__experiments=self.experiment,
+                        uri__contains=raw_dataset_path)
+                    if img_dfos.count() > 0:
+                        raw_dataset = img_dfos[0].datafile.dataset
+                        if match.groups()[0] is not None:
+                            store_auto_id(raw_dataset, match.groups()[3])
+                        auto_processing_link(raw_dataset, dataset)
                 result = result and self.add_subdir(ds_dir, dataset)
                 logfile = '%s.log' % dirname
                 if logfile in filenames:
