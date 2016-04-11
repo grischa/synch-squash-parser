@@ -1,5 +1,6 @@
 import ast
 import json
+import logging
 import os
 import pickletools
 import re
@@ -7,7 +8,6 @@ import re
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
 from django.utils.timezone import make_aware
-
 from tardis.tardis_portal.models import (
     Dataset, DataFile, DataFileObject,
     ParameterName, DatafileParameterSet,
@@ -16,8 +16,6 @@ from tardis.tardis_portal.models import (
     StorageBox, StorageBoxOption
 )
 from tardis.tardis_portal.models.datafile import compute_checksums
-
-import logging
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ def get_or_create_storage_box(datafile):
             status='empty',
             name=datafile.filename,
             description='SquashFS Archive in DataFile id: %d, filename: %s' %
-            (datafile.id, datafile.filename)
+                        (datafile.id, datafile.filename)
         )
         s_box.save()
         StorageBoxOption(key=key_name, value=datafile.id,
@@ -282,11 +280,11 @@ class ASSquashParser(object):
         ).string_value
 
         exp_ns = 'http://www.tardis.edu.au/schemas/as/experiment/2010/09/21'
-        parameter = ExperimentParameter.objects.get(
-            name__name='EPN',
-            name__schema__namespace=exp_ns,
-            string_value=self.epn)
-        self.experiment = parameter.parameterset.experiment
+        self.experiment = Experiment.objects.get(
+            datasets__datafile=squashfile,
+            experimentparameterset__experimentparameter__name__name='EPN',
+            experimentparameterset__experimentparameter__string_value=self.epn,
+            experimentparameterset__experimentparameter__name__schema__namespace=exp_ns)
         self.s_box = get_or_create_storage_box(squashfile)
         self.metadata = get_squashfs_metadata(self.s_box)
 
@@ -325,9 +323,10 @@ class ASSquashParser(object):
             dirnames.remove('calibration')
         if len(dirnames) > 0:
             result = result and all([
-                self.add_subdir(os.path.join(top, dirname),
-                                ignore=self.frames_ignore_paths)
-                for dirname in dirnames])
+                                        self.add_subdir(
+                                            os.path.join(top, dirname),
+                                            ignore=self.frames_ignore_paths)
+                                        for dirname in dirnames])
         return result
 
     def parse_home(self):
@@ -366,8 +365,10 @@ class ASSquashParser(object):
             result = result and self.add_files(top, filenames, user_dataset)
         if len(dirnames) > 0:
             result = result and all([
-                self.add_subdir(os.path.join(top, dirname), user_dataset)
-                for dirname in dirnames])
+                                        self.add_subdir(
+                                            os.path.join(top, dirname),
+                                            user_dataset)
+                                        for dirname in dirnames])
         return result
 
     def parse_auto_processing(self, userdir):
@@ -400,8 +401,10 @@ class ASSquashParser(object):
                 top, filenames, other_ds)
         if len(dirnames) > 0:
             result = result and all([
-                self.add_subdir(os.path.join(top, dirname), other_ds)
-                for dirname in dirnames])
+                                        self.add_subdir(
+                                            os.path.join(top, dirname),
+                                            other_ds)
+                                        for dirname in dirnames])
         return result
 
     def parse_indexing_results(self, userdir):
@@ -452,7 +455,7 @@ class ASSquashParser(object):
         if len(other_dirs) > 0:
             result = result and all([self.add_subdir(
                 os.path.join(top, dirname), other_ds)
-                for dirname in other_dirs])
+                                     for dirname in other_dirs])
         return result
 
     def parse_auto_dataset(self, userdir):
@@ -539,7 +542,7 @@ class ASSquashParser(object):
         if len(dirnames) > 0:
             result = result and all([self.add_subdir(
                 os.path.join(subdir, dirname), dataset, ignore)
-                for dirname in dirnames])
+                                     for dirname in dirnames])
         return result
 
     def create_dfo(self, top, filename, dataset=None):
@@ -723,7 +726,7 @@ class ASSquashParser(object):
         p_scientistid, created = DatasetParameter.objects.get_or_create(
             name=pn_scientistid, parameterset=ps)
         if p_scientistid.string_value is None or \
-           p_scientistid.string_value == '':
+                        p_scientistid.string_value == '':
             p_scientistid.string_value = data['ScientistID']
             p_scientistid.save()
 
@@ -737,7 +740,8 @@ class ASSquashParser(object):
         if len(split_top) > 1:
             comp_dir = os.path.join(*split_top[:3])
         if dataset.directory is None or (comp_dir is not None and
-           not dataset.directory.startswith(comp_dir)):
+                                             not dataset.directory.startswith(
+                                                 comp_dir)):
             dataset.directory = top
             dataset.save()
         self.tag_user(dataset, top)
